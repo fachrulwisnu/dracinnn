@@ -1,0 +1,6 @@
+{
+  "name": "PineDrama Sync & Stream",
+  "description": "Chinese Short Drama Streaming & Automated Background Scraper/Sync Web Application powered by Sansekai PineDrama API",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
