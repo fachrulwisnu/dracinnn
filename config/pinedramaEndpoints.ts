@@ -1,5 +1,5 @@
 /**
- * Configuration and Swagger/OpenAPI endpoint discovery for PineDrama on Sansekai API
+ * Configuration and Swagger/OpenAPI endpoint discovery for PineDrama & Melolo on Sansekai API
  */
 
 export const DEFAULT_PINEDRAMA_CONFIG = {
@@ -15,6 +15,21 @@ export const DEFAULT_PINEDRAMA_CONFIG = {
     detail: '/pinedrama/detail',
     getEpisode: '/pinedrama/get-episode',
   },
+};
+
+export const MELOLO_CONFIG = {
+  baseUrl: process.env.SANSEKAI_BASE_URL || 'https://api.sansekai.my.id/api',
+  defaultLang: 'id',
+  endpoints: {
+    search: '/melolo/search',
+    detail: '/melolo/detail',
+    getEpisode: '/melolo/get-episode',
+  },
+};
+
+export const SANSEKAI_ENDPOINTS = {
+  pinedrama: DEFAULT_PINEDRAMA_CONFIG.endpoints,
+  melolo: MELOLO_CONFIG.endpoints,
 };
 
 export async function discoverEndpoints(): Promise<typeof DEFAULT_PINEDRAMA_CONFIG.endpoints> {
@@ -43,3 +58,4 @@ export async function discoverEndpoints(): Promise<typeof DEFAULT_PINEDRAMA_CONF
   }
   return DEFAULT_PINEDRAMA_CONFIG.endpoints;
 }
+

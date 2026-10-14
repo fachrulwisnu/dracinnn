@@ -1,16 +1,19 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { Header } from './components/Header';
 import { SyncControlCenter } from './components/SyncControlCenter';
-import { PineDramaPortal } from './components/PineDramaPortal';
-import { VideoPlayerModal } from './components/VideoPlayerModal';
+import { DracinPortal } from './components/DracinPortal';
+import { AutoEpisodeFetcher } from './components/AutoEpisodeFetcher';
+import { EpisodeInspectorModal } from './components/EpisodeInspectorModal';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'portal' | 'sync'>('portal');
+  const [activeTab, setActiveTab] = useState<'portal' | 'fetcher' | 'sync'>('portal');
   const [categories, setCategories] = useState<any[]>([]);
   const [dramas, setDramas] = useState<any[]>([]);
+  const [selectedProvider, setSelectedProvider] = useState<string>('all');
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [sortOption, setSortOption] = useState<string>('importedAt_desc');
+  const [tableProviderFilter, setTableProviderFilter] = useState<string>('all');
 
   const [workerState, setWorkerState] = useState<any>({
     isRunning: false,
@@ -29,14 +32,14 @@ export default function App() {
 
   const [loadingAction, setLoadingAction] = useState<string | null>(null);
 
-  // Video Modal State
+  // Inspector / Player Modal State
   const [selectedDramaDetail, setSelectedDramaDetail] = useState<any | null>(null);
   const [selectedDramaEpisodes, setSelectedDramaEpisodes] = useState<any[]>([]);
 
   // Fetch Sync Status
   const fetchSyncStatus = useCallback(async () => {
     try {
-      const res = await fetch('/api/sync/status');
+      const res = await fetch(`/api/sync/status?provider=${selectedProvider}`);
       if (res.ok) {
         const data = await res.json();
         if (data.success) {
@@ -47,12 +50,16 @@ export default function App() {
     } catch (err) {
       console.error('Error polling sync status:', err);
     }
-  }, []);
+  }, [selectedProvider]);
 
   // Fetch Categories
   const fetchCategories = useCallback(async () => {
     try {
-      const res = await fetch('/api/categories');
+      const url = new URL('/api/categories', window.location.origin);
+      if (selectedProvider !== 'all') {
+        url.searchParams.set('provider', selectedProvider);
+      }
+      const res = await fetch(url.toString());
       if (res.ok) {
         const data = await res.json();
         if (data.success) {
@@ -62,12 +69,16 @@ export default function App() {
     } catch (err) {
       console.error('Error fetching categories:', err);
     }
-  }, []);
+  }, [selectedProvider]);
 
   // Fetch Dramas
   const fetchDramas = useCallback(async () => {
     try {
       const url = new URL('/api/dramas', window.location.origin);
+      const prov = activeTab === 'portal' ? selectedProvider : tableProviderFilter;
+      if (prov !== 'all') {
+        url.searchParams.set('provider', prov);
+      }
       if (selectedCategory !== 'all') {
         url.searchParams.set('categoryId', selectedCategory);
       }
@@ -87,7 +98,7 @@ export default function App() {
     } catch (err) {
       console.error('Error fetching dramas:', err);
     }
-  }, [selectedCategory, searchQuery, sortOption]);
+  }, [selectedProvider, tableProviderFilter, selectedCategory, searchQuery, sortOption, activeTab]);
 
   // Initial load
   useEffect(() => {
@@ -96,12 +107,12 @@ export default function App() {
     fetchSyncStatus();
   }, [fetchCategories, fetchDramas, fetchSyncStatus]);
 
-  // Polling sync status every 3s
+  // Polling sync status every 4s
   useEffect(() => {
     const interval = setInterval(() => {
       fetchSyncStatus();
       fetchDramas();
-    }, 3000);
+    }, 4000);
     return () => clearInterval(interval);
   }, [fetchSyncStatus, fetchDramas]);
 
@@ -166,7 +177,7 @@ export default function App() {
     fetchSyncStatus();
   };
 
-  // Open Video Drawer for a Drama
+  // Open Episode Inspector Modal for a Drama
   const handleSelectDrama = async (dramaId: string) => {
     try {
       const res = await fetch(`/api/dramas/${dramaId}`);
@@ -182,18 +193,6 @@ export default function App() {
     }
   };
 
-  // On-demand episode fetch callback
-  const handleFetchOnDemand = async (dramaId: string, epNum: number): Promise<string> => {
-    const res = await fetch(`/api/episodes/${dramaId}/${epNum}/stream`);
-    const data = await res.json();
-    if (!res.ok || !data.success || !data.streamUrl) {
-      throw new Error(data.error || 'Stream URL unavailable');
-    }
-
-    handleSelectDrama(dramaId);
-    return data.streamUrl;
-  };
-
   return (
     <div className="min-h-screen bg-[#0a0d14] text-slate-100 font-sans antialiased selection:bg-amber-500 selection:text-slate-950">
       <Header
@@ -206,17 +205,25 @@ export default function App() {
       />
 
       <main className="pb-12">
-        {activeTab === 'portal' ? (
-          <PineDramaPortal
+        {activeTab === 'portal' && (
+          <DracinPortal
             categories={categories}
             dramas={dramas}
+            selectedProvider={selectedProvider}
+            onSelectProvider={setSelectedProvider}
             selectedCategory={selectedCategory}
             onSelectCategory={setSelectedCategory}
             searchQuery={searchQuery}
             onSearchChange={setSearchQuery}
             onSelectDrama={handleSelectDrama}
           />
-        ) : (
+        )}
+
+        {activeTab === 'fetcher' && (
+          <AutoEpisodeFetcher onRefreshData={handleRefreshAllData} />
+        )}
+
+        {activeTab === 'sync' && (
           <SyncControlCenter
             workerState={workerState}
             counters={counters}
@@ -229,19 +236,21 @@ export default function App() {
             onSelectDrama={handleSelectDrama}
             onClearLogs={handleClearLogs}
             onSortChange={setSortOption}
+            onProviderFilterChange={setTableProviderFilter}
+            selectedTableProvider={tableProviderFilter}
             onRefreshAllData={handleRefreshAllData}
             loadingAction={loadingAction}
           />
         )}
       </main>
 
-      {/* Video Player Modal */}
+      {/* 🎬 Episode Inspector & Granular Sync Control Modal */}
       {selectedDramaDetail && (
-        <VideoPlayerModal
+        <EpisodeInspectorModal
           drama={selectedDramaDetail}
-          episodes={selectedDramaEpisodes}
+          initialEpisodes={selectedDramaEpisodes}
           onClose={() => setSelectedDramaDetail(null)}
-          onFetchOnDemand={handleFetchOnDemand}
+          onRefreshData={handleRefreshAllData}
         />
       )}
     </div>

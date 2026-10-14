@@ -1,12 +1,18 @@
+import axios from 'axios';
 import { Router, Request, Response } from 'express';
-import { connectDB } from '../services/db.js';
-import { Category } from '../models/Category.js';
-import { Drama } from '../models/Drama.js';
-import { Episode } from '../models/Episode.js';
+import { connectDB, runMigrationAndCleanup } from '../services/db.js';
+import { PineDramaCategory } from '../models/Category.js';
+import { PineDramaDrama } from '../models/Drama.js';
+import { PineDramaEpisode } from '../models/Episode.js';
+import { MeloloCategory } from '../models/MeloloCategory.js';
+import { MeloloDrama } from '../models/MeloloDrama.js';
+import { MeloloEpisode } from '../models/MeloloEpisode.js';
 import { SyncJobState } from '../models/SyncJobState.js';
 import { NewlyAddedLog } from '../models/NewlyAddedLog.js';
 import { syncWorker } from '../services/rateLimitedSyncWorker.js';
-import { sansekaiApi, parseEpisodeResponse } from '../services/sansekaiPinedramaApi.js';
+import { sansekaiApi } from '../services/sansekaiPinedramaApi.js';
+import { getCategoryModel, getDramaModel, getEpisodeModel } from '../services/modelResolver.js';
+import { normalizeDramaItem, normalizeMeloloDetail, normalizeEpisodeResponse } from '../services/providerAdapter.js';
 
 const router = Router();
 
@@ -21,10 +27,29 @@ router.use(async (_req, _res, next) => {
 
 /**
  * GET /api/categories
+ * Supports provider filter ('all' | 'pinedrama' | 'melolo')
  */
-router.get('/categories', async (_req: Request, res: Response) => {
+router.get('/categories', async (req: Request, res: Response) => {
   try {
-    const categories = await Category.find().sort({ totalTitles: -1, name: 1 });
+    const { provider } = req.query;
+    let categories: any[] = [];
+
+    if (!provider || provider === 'all') {
+      const pineCats = await PineDramaCategory.find().sort({ totalTitles: -1, name: 1 }).lean();
+      const meloloCats = await MeloloCategory.find().sort({ totalTitles: -1, name: 1 }).lean();
+
+      categories = [
+        ...pineCats.map((c) => ({ ...c, provider: 'pinedrama' })),
+        ...meloloCats.map((c) => ({ ...c, provider: 'melolo' })),
+      ];
+    } else if (provider === 'melolo') {
+      const meloloCats = await MeloloCategory.find().sort({ totalTitles: -1, name: 1 }).lean();
+      categories = meloloCats.map((c) => ({ ...c, provider: 'melolo' }));
+    } else {
+      const pineCats = await PineDramaCategory.find().sort({ totalTitles: -1, name: 1 }).lean();
+      categories = pineCats.map((c) => ({ ...c, provider: 'pinedrama' }));
+    }
+
     res.json({ success: true, count: categories.length, categories });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
@@ -33,29 +58,35 @@ router.get('/categories', async (_req: Request, res: Response) => {
 
 /**
  * GET /api/dramas
- * Supports categoryId, syncStatus, q search, and sort (importedAt_desc, eps_desc, eps_asc, progress_desc)
+ * Supports provider ('all' | 'pinedrama' | 'melolo'), categoryId, syncStatus, q, sort
  */
 router.get('/dramas', async (req: Request, res: Response) => {
   try {
-    const { categoryId, syncStatus, q, sort } = req.query;
-    const filter: any = {};
+    const { provider, categoryId, syncStatus, q, sort } = req.query;
+    const targetProvider = (provider as string) || 'all';
 
-    if (categoryId && categoryId !== 'all') {
-      const categoryDoc = await Category.findOne({ categoryId: categoryId as string });
-      if (categoryDoc) {
-        filter.categories = categoryDoc.name;
-      } else {
-        filter.categories = categoryId as string;
+    const buildFilter = (catName?: string) => {
+      const filter: any = {};
+      if (catName && catName !== 'all') {
+        filter.categories = catName;
       }
+      if (syncStatus && syncStatus !== 'all') {
+        filter.syncStatus = syncStatus as string;
+      }
+      if (q && typeof q === 'string' && q.trim()) {
+        filter.title = { $regex: q.trim(), $options: 'i' };
+      }
+      return filter;
+    };
+
+    let categoryName = 'all';
+    if (categoryId && categoryId !== 'all') {
+      const pineCat = await PineDramaCategory.findOne({ categoryId: categoryId as string });
+      const meloloCat = await MeloloCategory.findOne({ categoryId: categoryId as string });
+      categoryName = pineCat?.name || meloloCat?.name || (categoryId as string);
     }
 
-    if (syncStatus && syncStatus !== 'all') {
-      filter.syncStatus = syncStatus as string;
-    }
-
-    if (q && typeof q === 'string' && q.trim()) {
-      filter.title = { $regex: q.trim(), $options: 'i' };
-    }
+    let dramas: any[] = [];
 
     let sortObj: any = { importedAt: -1, updatedAt: -1 };
     if (sort === 'eps_desc') {
@@ -68,7 +99,29 @@ router.get('/dramas', async (req: Request, res: Response) => {
       sortObj = { importedAt: -1, createdAt: -1 };
     }
 
-    const dramas = await Drama.find(filter).sort(sortObj);
+    const filter = buildFilter(categoryName);
+
+    if (targetProvider === 'all' || targetProvider === 'pinedrama') {
+      const pineDramas = await PineDramaDrama.find(filter).sort(sortObj).lean();
+      dramas.push(...pineDramas.map((d) => ({ ...d, provider: 'pinedrama' })));
+    }
+
+    if (targetProvider === 'all' || targetProvider === 'melolo') {
+      const meloloDramas = await MeloloDrama.find(filter).sort(sortObj).lean();
+      dramas.push(...meloloDramas.map((d) => ({ ...d, provider: 'melolo' })));
+    }
+
+    // Sort combined list if 'all'
+    if (targetProvider === 'all') {
+      dramas.sort((a, b) => {
+        if (sort === 'eps_desc') return (b.totalEpisodes || 0) - (a.totalEpisodes || 0);
+        if (sort === 'eps_asc') return (a.totalEpisodes || 0) - (b.totalEpisodes || 0);
+        if (sort === 'progress_desc') return (b.syncedEpisodesCount || 0) - (a.syncedEpisodesCount || 0);
+        const timeA = new Date(a.importedAt || a.createdAt || 0).getTime();
+        const timeB = new Date(b.importedAt || b.createdAt || 0).getTime();
+        return timeB - timeA;
+      });
+    }
 
     res.json({
       success: true,
@@ -81,31 +134,80 @@ router.get('/dramas', async (req: Request, res: Response) => {
 });
 
 /**
+ * GET /api/dramas/audit-synopsis
+ * Returns stats on dramas lacking synopsis across collections
+ */
+router.get('/dramas/audit-synopsis', async (_req: Request, res: Response) => {
+  try {
+    const pineNeedy = await PineDramaDrama.find({
+      $or: [{ synopsis: '' }, { synopsis: null }, { synopsis: { $exists: false } }],
+    }).lean();
+
+    const meloloNeedy = await MeloloDrama.find({
+      $or: [{ synopsis: '' }, { synopsis: null }, { hasSynopsis: false }],
+    }).lean();
+
+    res.json({
+      success: true,
+      pineNeedyCount: pineNeedy.length,
+      meloloNeedyCount: meloloNeedy.length,
+      totalNeedyCount: pineNeedy.length + meloloNeedy.length,
+      pineNeedyList: pineNeedy.map((d) => ({ dramaId: d.dramaId, title: d.title, provider: 'pinedrama' })),
+      meloloNeedyList: meloloNeedy.map((d) => ({ dramaId: d.book_id || d.dramaId, title: d.title, provider: 'melolo' })),
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
  * POST /api/dramas/check-existing
- * Compares incoming collection_ids against MongoDB Atlas
  */
 router.post('/dramas/check-existing', async (req: Request, res: Response) => {
   try {
-    const { collectionIds } = req.body;
+    const { provider, collectionIds } = req.body;
     if (!Array.isArray(collectionIds) || collectionIds.length === 0) {
       return res.json({ success: true, existingMap: {} });
     }
 
-    const existingDocs = await Drama.find({
-      $or: [{ dramaId: { $in: collectionIds } }, { collection_id: { $in: collectionIds } }],
-    }).lean();
-
     const existingMap: Record<string, any> = {};
-    for (const doc of existingDocs) {
-      const id = doc.collection_id || doc.dramaId;
-      existingMap[id] = {
-        inDb: true,
-        dbTotalEpisodes: doc.totalEpisodes || 0,
-        dbSyncedEpisodes: doc.syncedEpisodesCount || 0,
-        dbPendingEpisodes: doc.pendingEpisodesCount || 0,
-        syncStatus: doc.syncStatus,
-        importedAt: doc.importedAt,
-      };
+
+    if (!provider || provider === 'all' || provider === 'pinedrama') {
+      const pineDocs = await PineDramaDrama.find({
+        $or: [{ dramaId: { $in: collectionIds } }, { collection_id: { $in: collectionIds } }],
+      }).lean();
+
+      for (const doc of pineDocs) {
+        const id = doc.collection_id || doc.dramaId;
+        existingMap[id] = {
+          inDb: true,
+          dbTotalEpisodes: doc.totalEpisodes || 0,
+          dbSyncedEpisodes: doc.syncedEpisodesCount || 0,
+          dbPendingEpisodes: doc.pendingEpisodesCount || 0,
+          syncStatus: doc.syncStatus,
+          importedAt: doc.importedAt,
+          provider: 'pinedrama',
+        };
+      }
+    }
+
+    if (!provider || provider === 'all' || provider === 'melolo') {
+      const meloloDocs = await MeloloDrama.find({
+        $or: [{ book_id: { $in: collectionIds } }, { collection_id: { $in: collectionIds } }, { dramaId: { $in: collectionIds } }],
+      }).lean();
+
+      for (const doc of meloloDocs) {
+        const id = doc.book_id || doc.collection_id || doc.dramaId;
+        existingMap[id] = {
+          inDb: true,
+          dbTotalEpisodes: doc.totalEpisodes || 0,
+          dbSyncedEpisodes: doc.syncedEpisodesCount || 0,
+          dbPendingEpisodes: doc.pendingEpisodesCount || 0,
+          syncStatus: doc.syncStatus,
+          importedAt: doc.importedAt,
+          provider: 'melolo',
+        };
+      }
     }
 
     res.json({ success: true, existingMap });
@@ -115,46 +217,526 @@ router.post('/dramas/check-existing', async (req: Request, res: Response) => {
 });
 
 /**
+ * GET /api/proxy-image
+ */
+router.get('/proxy-image', async (req: Request, res: Response) => {
+  try {
+    const imageUrl = req.query.url as string;
+    if (!imageUrl || typeof imageUrl !== 'string') {
+      return res.status(400).send('Missing url parameter');
+    }
+
+    const response = await axios.get(imageUrl, {
+      responseType: 'arraybuffer',
+      timeout: 15000,
+      headers: {
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+        Accept: 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+        Referer: '',
+      },
+    });
+
+    const contentType = (response.headers['content-type'] as string) || 'image/jpeg';
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Cache-Control', 'public, max-age=86400');
+    res.send(Buffer.from(response.data));
+  } catch (err: any) {
+    res.redirect('https://placehold.co/400x600/1e293b/cbd5e1?text=No+Cover');
+  }
+});
+
+/**
+ * GET /api/proxy-sansekai
+ * Proxy fallback for browser requests to Sansekai API to guarantee valid JSON responses (never HTML)
+ */
+router.get('/proxy-sansekai', async (req: Request, res: Response) => {
+  try {
+    let targetUrl = req.query.url as string;
+    if (!targetUrl) {
+      return res.status(400).json({ success: false, error: 'Query parameter "url" is required' });
+    }
+
+    if (!targetUrl.startsWith('http://') && !targetUrl.startsWith('https://')) {
+      if (targetUrl.startsWith('/')) {
+        targetUrl = `https://api.sansekai.my.id${targetUrl}`;
+      } else {
+        targetUrl = `https://api.sansekai.my.id/api/${targetUrl}`;
+      }
+    }
+
+    const queryParams: Record<string, any> = { ...req.query };
+    delete queryParams.url;
+
+    const sansekaiRes = await axios.get(targetUrl, {
+      params: queryParams,
+      timeout: 25000,
+      headers: {
+        'User-Agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+        Accept: 'application/json, text/plain, */*',
+        'Accept-Language': 'id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7',
+      },
+    });
+
+    res.setHeader('Content-Type', 'application/json');
+    res.json(sansekaiRes.data);
+  } catch (err: any) {
+    const status = err.response?.status || 500;
+    const dataSnippet = err.response?.data || err.message;
+    res.status(status).json({
+      success: false,
+      error: `Proxy error: ${err.message}`,
+      status,
+      dataSnippet,
+    });
+  }
+});
+
+/**
+ * GET /api/dramas/melolo-needing-fix
+ */
+router.get('/dramas/melolo-needing-fix', async (_req: Request, res: Response) => {
+  try {
+    const meloloDramas = await MeloloDrama.find().lean();
+
+    const needy = meloloDramas.filter((d: any) => {
+      const hasNoCover = !d.coverUrl || d.coverUrl.includes('placehold.co') || d.coverUrl.trim() === '';
+      const hasDefaultCat =
+        !d.categories ||
+        d.categories.length === 0 ||
+        d.categories.some((c: string) => c === 'Melolo Short Drama' || c === 'General');
+      const hasDefaultEps = !d.totalEpisodes || d.totalEpisodes === 30 || d.syncedEpisodesCount === 0;
+
+      return hasNoCover || hasDefaultCat || hasDefaultEps || !d.hasSynopsis;
+    });
+
+    res.json({
+      success: true,
+      count: needy.length,
+      dramas: needy.map((d: any) => ({
+        dramaId: d.book_id || d.collection_id || d.dramaId,
+        collection_id: d.book_id || d.collection_id || d.dramaId,
+        title: d.title,
+        coverUrl: d.coverUrl,
+        categories: d.categories,
+        totalEpisodes: d.totalEpisodes,
+        provider: 'melolo',
+      })),
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
+ * POST /api/dramas/update-melolo-detail
+ * Enriches MeloloDrama and MeloloEpisode documents in melolo_* collections
+ */
+router.post('/dramas/update-melolo-detail', async (req: Request, res: Response) => {
+  try {
+    const { rawDetail, collection_id: customId } = req.body;
+    if (!rawDetail) {
+      return res.status(400).json({ success: false, error: 'Missing rawDetail payload' });
+    }
+
+    const normalized = normalizeMeloloDetail(rawDetail);
+    const collectionId = normalized.collection_id || customId;
+
+    if (!collectionId) {
+      return res.status(400).json({ success: false, error: 'Could not resolve collection_id for Melolo drama' });
+    }
+
+    let drama = await MeloloDrama.findOne({
+      $or: [{ book_id: collectionId }, { collection_id: collectionId }, { dramaId: collectionId }],
+    });
+
+    if (!drama) {
+      drama = new MeloloDrama({
+        book_id: collectionId,
+        collection_id: collectionId,
+        dramaId: collectionId,
+        title: normalized.title,
+        coverUrl: normalized.coverUrl,
+        synopsis: normalized.synopsis,
+        hasSynopsis: Boolean(normalized.synopsis && normalized.synopsis.trim().length > 0),
+        categories: normalized.categories,
+        totalEpisodes: normalized.totalEpisodes,
+        syncedEpisodesCount: 0,
+        pendingEpisodesCount: normalized.totalEpisodes,
+        syncStatus: 'PENDING_EPISODES',
+        source: 'Melolo Detail Enrich',
+        isNewlyAdded: true,
+        importedAt: new Date(),
+        lastSyncedAt: new Date(),
+      });
+    } else {
+      if (normalized.coverUrl && !normalized.coverUrl.includes('placehold.co')) {
+        drama.coverUrl = normalized.coverUrl;
+      }
+      if (normalized.title && !drama.title.includes('Om-om') && normalized.title !== drama.title) {
+        drama.title = normalized.title;
+      }
+      if (normalized.synopsis) {
+        drama.synopsis = normalized.synopsis;
+        drama.hasSynopsis = true;
+      }
+
+      const filteredCats = normalized.categories.filter((c) => c !== 'Melolo Short Drama' && c !== 'General');
+      if (filteredCats.length > 0) {
+        drama.categories = filteredCats;
+      }
+
+      if (normalized.totalEpisodes > drama.totalEpisodes) {
+        drama.totalEpisodes = normalized.totalEpisodes;
+      }
+      drama.lastSyncedAt = new Date();
+    }
+
+    await drama.save();
+
+    // Insert/Update Episode documents with video_id (vid) into melolo_episodes collection
+    if (Array.isArray(normalized.video_list) && normalized.video_list.length > 0) {
+      for (const v of normalized.video_list) {
+        const epNum = v.episodeNumber;
+        const vid = v.video_id;
+
+        await MeloloEpisode.findOneAndUpdate(
+          {
+            $or: [{ book_id: collectionId }, { collection_id: collectionId }, { dramaId: collectionId }],
+            episodeNumber: epNum,
+          },
+          {
+            book_id: collectionId,
+            collection_id: collectionId,
+            dramaId: collectionId,
+            episodeNumber: epNum,
+            video_id: vid || null,
+            title: v.title || `Episode ${epNum}`,
+            episodeCover: v.cover || drama.coverUrl,
+            duration: v.duration || 0,
+          },
+          { upsert: true }
+        );
+      }
+    }
+
+    await syncWorker.recalculateDramaCounts(collectionId, 'melolo');
+
+    // Upsert Categories to melolo_categories
+    for (const catName of drama.categories) {
+      const slug = catName.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+      const count = await MeloloDrama.countDocuments({ categories: catName });
+      await MeloloCategory.findOneAndUpdate(
+        { categoryId: slug },
+        {
+          categoryId: slug,
+          name: catName,
+          slug,
+          totalTitles: count,
+          lastSyncedAt: new Date(),
+        },
+        { upsert: true }
+      );
+    }
+
+    res.json({
+      success: true,
+      message: `Enriched Melolo drama "${drama.title}" with ${normalized.video_list?.length || 0} episodes in melolo_episodes!`,
+      drama,
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
+ * POST /api/dramas/resync-detail
+ * Enriches details/synopsis for either PineDrama or Melolo
+ */
+router.post('/api/dramas/resync-detail', async (req: Request, res: Response) => {
+  try {
+    const { provider, dramaId, title, synopsis, coverUrl, categories } = req.body;
+    const targetProvider = provider === 'melolo' ? 'melolo' : 'pinedrama';
+    const DramaModel = getDramaModel(targetProvider);
+
+    const filter = { $or: [{ dramaId }, { collection_id: dramaId }, { book_id: dramaId }] };
+    const doc = await DramaModel.findOne(filter);
+
+    if (doc) {
+      if (title) doc.title = title;
+      if (synopsis) {
+        doc.synopsis = synopsis;
+        if ('hasSynopsis' in doc) (doc as any).hasSynopsis = true;
+      }
+      if (coverUrl) doc.coverUrl = coverUrl;
+      if (Array.isArray(categories) && categories.length > 0) doc.categories = categories;
+      doc.lastSyncedAt = new Date();
+      await doc.save();
+    }
+
+    res.json({ success: true, message: `Updated detail for ${dramaId} in ${targetProvider}` });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
+ * PUT /api/dramas/:provider/:dramaId
+ * Edit Drama manually (Title, Synopsis, Cover URL, Categories)
+ */
+router.put('/dramas/:provider/:dramaId', async (req: Request, res: Response) => {
+  try {
+    const { provider, dramaId } = req.params;
+    const { title, synopsis, coverUrl, categories } = req.body;
+    const targetProvider = provider === 'melolo' ? 'melolo' : 'pinedrama';
+    const DramaModel = getDramaModel(targetProvider);
+
+    const filter = { $or: [{ dramaId }, { collection_id: dramaId }, { book_id: dramaId }] };
+    const drama = await DramaModel.findOne(filter);
+
+    if (!drama) {
+      return res.status(404).json({ success: false, error: 'Drama not found' });
+    }
+
+    if (title !== undefined) drama.title = title;
+    if (synopsis !== undefined) {
+      drama.synopsis = synopsis;
+      if ('hasSynopsis' in drama) (drama as any).hasSynopsis = Boolean(synopsis && synopsis.trim().length > 0);
+    }
+    if (coverUrl !== undefined) drama.coverUrl = coverUrl;
+    if (Array.isArray(categories)) drama.categories = categories;
+    drama.lastSyncedAt = new Date();
+
+    await drama.save();
+
+    res.json({ success: true, message: `Drama ${dramaId} updated successfully`, drama });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
+ * DELETE /api/dramas/:provider/:dramaId
+ * Deletes drama document AND all associated episode documents from provider's collection
+ */
+router.delete('/dramas/:provider/:dramaId', async (req: Request, res: Response) => {
+  try {
+    const { provider, dramaId } = req.params;
+    const targetProvider = provider === 'melolo' ? 'melolo' : 'pinedrama';
+    const DramaModel = getDramaModel(targetProvider);
+    const EpisodeModel = getEpisodeModel(targetProvider);
+
+    const filter = { $or: [{ dramaId }, { collection_id: dramaId }, { book_id: dramaId }] };
+
+    const deletedDrama = await DramaModel.findOneAndDelete(filter);
+    const deletedEps = await EpisodeModel.deleteMany(filter);
+
+    res.json({
+      success: true,
+      message: `Deleted drama "${deletedDrama?.title || dramaId}" and ${deletedEps.deletedCount} episodes from ${targetProvider} collections.`,
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
+ * PUT /api/episodes/:provider/:dramaId/:episodeNumber
+ * Edit manual episode stream URL and video_id
+ */
+router.put('/episodes/:provider/:dramaId/:episodeNumber', async (req: Request, res: Response) => {
+  try {
+    const { provider, dramaId, episodeNumber } = req.params;
+    const { streamUrl, video_id, title, quality } = req.body;
+    const epNum = parseInt(episodeNumber, 10);
+    const targetProvider = provider === 'melolo' ? 'melolo' : 'pinedrama';
+    const EpisodeModel = getEpisodeModel(targetProvider);
+
+    const filter = targetProvider === 'melolo'
+      ? { $or: [{ book_id: dramaId }, { collection_id: dramaId }, { dramaId }], episodeNumber: epNum }
+      : { $or: [{ collection_id: dramaId }, { dramaId }], episodeNumber: epNum };
+
+    const update: any = {
+      provider: targetProvider,
+      collection_id: dramaId,
+      dramaId,
+      streamUrl: streamUrl || null,
+      bestUrl: streamUrl || null,
+      video_id: video_id || null,
+      syncStatus: streamUrl ? 'SYNCED' : 'PENDING',
+      lastSyncedAt: new Date(),
+    };
+
+    if (targetProvider === 'melolo') {
+      update.book_id = dramaId;
+    }
+
+    if (title) update.title = title;
+    if (quality) update.quality = quality;
+    if (streamUrl) update.backupUrls = [streamUrl];
+
+    const episode = await EpisodeModel.findOneAndUpdate(filter, update, { upsert: true, new: true, strict: false });
+    await syncWorker.recalculateDramaCounts(dramaId, targetProvider);
+
+    res.json({ success: true, message: `Episode ${epNum} updated successfully`, episode });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
+ * DELETE /api/episodes/:provider/:dramaId/:episodeNumber/reset
+ * Resets episode stream URL to pending
+ */
+router.delete('/episodes/:provider/:dramaId/:episodeNumber/reset', async (req: Request, res: Response) => {
+  try {
+    const { provider, dramaId, episodeNumber } = req.params;
+    const epNum = parseInt(episodeNumber, 10);
+    const targetProvider = provider === 'melolo' ? 'melolo' : 'pinedrama';
+    const EpisodeModel = getEpisodeModel(targetProvider);
+
+    const filter = {
+      $or: [{ dramaId }, { collection_id: dramaId }, { book_id: dramaId }],
+      episodeNumber: epNum,
+    };
+
+    const episode = await EpisodeModel.findOneAndUpdate(
+      filter,
+      {
+        streamUrl: null,
+        bestUrl: null,
+        qualities: [],
+        backupUrls: [],
+        syncStatus: 'PENDING',
+        errorMessage: null,
+      },
+      { new: true }
+    );
+
+    await syncWorker.recalculateDramaCounts(dramaId, targetProvider);
+
+    res.json({ success: true, message: `Episode ${epNum} reset to PENDING`, episode });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
+ * POST /api/admin/cleanup-melolo-in-pinedrama
+ * Purges any Melolo contamination remaining in pinedrama_* collections
+ */
+router.post('/admin/cleanup-melolo-in-pinedrama', async (_req: Request, res: Response) => {
+  try {
+    const result = await runMigrationAndCleanup();
+    res.json({
+      success: true,
+      message: `Cleaned up contamination! Migrated ${result.migratedDramas} dramas, ${result.migratedEpisodes} episodes, ${result.migratedCategories} categories to melolo_* collections and purged from pinedrama_*!`,
+      result,
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
+ * DELETE /api/admin/purge-provider-data
+ * Bulk Cleanup by Provider, Tag/Category, or Reset Pending Episodes
+ */
+router.delete('/admin/purge-provider-data', async (req: Request, res: Response) => {
+  try {
+    const { provider, actionTarget, categoryName } = req.body;
+    const targetProvider = provider === 'melolo' ? 'melolo' : 'pinedrama';
+    const DramaModel = getDramaModel(targetProvider);
+    const EpisodeModel = getEpisodeModel(targetProvider);
+    const CategoryModel = getCategoryModel(targetProvider);
+
+    if (actionTarget === 'purge_all_dramas') {
+      const dramaDel = await DramaModel.deleteMany({});
+      const epDel = await EpisodeModel.deleteMany({});
+      await CategoryModel.deleteMany({});
+
+      return res.json({
+        success: true,
+        message: `Purged ALL ${targetProvider.toUpperCase()} data (${dramaDel.deletedCount} dramas, ${epDel.deletedCount} episodes).`,
+      });
+    }
+
+    if (actionTarget === 'reset_all_pending') {
+      const resetRes = await EpisodeModel.updateMany(
+        { syncStatus: 'FAILED' },
+        { syncStatus: 'PENDING', errorMessage: null }
+      );
+      return res.json({
+        success: true,
+        message: `Reset ${resetRes.modifiedCount} failed episodes in ${targetProvider.toUpperCase()} to PENDING.`,
+      });
+    }
+
+    if (actionTarget === 'delete_by_category' && categoryName) {
+      const dramasToDelete = await DramaModel.find({ categories: categoryName }).lean();
+      const ids = dramasToDelete.map((d: any) => d.book_id || d.collection_id || d.dramaId);
+
+      const epDel = await EpisodeModel.deleteMany({
+        $or: [{ dramaId: { $in: ids } }, { collection_id: { $in: ids } }, { book_id: { $in: ids } }],
+      });
+      const dramaDel = await DramaModel.deleteMany({ categories: categoryName });
+      await CategoryModel.deleteMany({ name: categoryName });
+
+      return res.json({
+        success: true,
+        message: `Deleted category "${categoryName}" (${dramaDel.deletedCount} dramas, ${epDel.deletedCount} episodes) from ${targetProvider.toUpperCase()}.`,
+      });
+    }
+
+    return res.status(400).json({ success: false, error: 'Invalid purge parameters' });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
  * POST /api/sync/import-dramas
- * Selective & Batch insert into MongoDB Atlas (Drama + Episode Skeletons + Category Sync + Newly Added Log)
+ * Import dramas into provider-isolated collections
  */
 router.post('/sync/import-dramas', async (req: Request, res: Response) => {
   try {
-    const { dramas, source } = req.body;
+    const { provider, dramas, source } = req.body;
+    const targetProvider = provider === 'melolo' ? 'melolo' : 'pinedrama';
+    const DramaModel = getDramaModel(targetProvider);
+    const EpisodeModel = getEpisodeModel(targetProvider);
+    const CategoryModel = getCategoryModel(targetProvider);
+
     if (!Array.isArray(dramas) || dramas.length === 0) {
       return res.status(400).json({ success: false, error: 'No dramas provided to import.' });
     }
 
-    const importSource = source || 'PineDrama Explorer';
+    const importSource = source || `${targetProvider.toUpperCase()} Explorer`;
     const newlyAddedList: any[] = [];
     let totalNewEpisodesAdded = 0;
     const categoriesFound = new Set<string>();
 
-    for (const item of dramas) {
-      const collectionId = item.collection_id || item.dramaId;
-      if (!collectionId || !item.title) continue;
+    for (const rawItem of dramas) {
+      const normalized = normalizeDramaItem(rawItem, targetProvider, importSource);
+      const collectionId = normalized.collection_id;
+      if (!collectionId || !normalized.title) continue;
 
-      let dramaCats: string[] = item.categories || [];
-      if (typeof dramaCats === 'string') {
-        dramaCats = (dramaCats as string).split(',').map((c) => c.trim()).filter(Boolean);
-      }
-      if (dramaCats.length === 0) dramaCats = ['General'];
-      dramaCats.forEach((c) => categoriesFound.add(c));
+      normalized.categories.forEach((c) => categoriesFound.add(c));
+      const totalEps = normalized.totalEpisodes;
 
-      const totalEps = item.totalEpisodes || item.total_episodes || 30;
-
-      const existingDrama = await Drama.findOne({
-        $or: [{ dramaId: collectionId }, { collection_id: collectionId }],
+      const existingDrama = await DramaModel.findOne({
+        $or: [{ dramaId: collectionId }, { collection_id: collectionId }, { book_id: collectionId }],
       });
 
       if (!existingDrama) {
-        await Drama.create({
-          dramaId: collectionId,
+        const createDoc: any = {
+          book_id: collectionId,
           collection_id: collectionId,
-          title: item.title,
-          coverUrl: item.coverUrl || item.cover || '',
-          synopsis: item.synopsis || item.description || '',
-          categories: dramaCats,
+          dramaId: collectionId,
+          title: normalized.title,
+          coverUrl: normalized.coverUrl,
+          synopsis: normalized.synopsis,
+          categories: normalized.categories,
           totalEpisodes: totalEps,
           syncedEpisodesCount: 0,
           pendingEpisodesCount: totalEps,
@@ -163,39 +745,71 @@ router.post('/sync/import-dramas', async (req: Request, res: Response) => {
           isNewlyAdded: true,
           importedAt: new Date(),
           lastSyncedAt: new Date(),
-        });
-
-        // Create skeleton episode documents (1..totalEps)
-        const epDocs = [];
-        for (let i = 1; i <= totalEps; i++) {
-          epDocs.push({
-            dramaId: collectionId,
-            collection_id: collectionId,
-            episodeId: `${collectionId}_ep_${i}`,
-            episodeNumber: i,
-            title: `Episode ${i}`,
-            streamUrl: null,
-            syncStatus: 'PENDING',
-            errorMessage: null,
-          });
+        };
+        if (targetProvider === 'melolo') {
+          createDoc.hasSynopsis = Boolean(normalized.synopsis && normalized.synopsis.trim().length > 0);
         }
+
+        await DramaModel.create(createDoc);
+
+        // Skeleton / Full Episode docs creation
+        const epDocs = [];
+        if (Array.isArray(normalized.video_list) && normalized.video_list.length > 0) {
+          normalized.video_list.forEach((v: any, idx: number) => {
+            const epNum = v.vid_index || v.episodeNumber || idx + 1;
+            const vid = v.vid || v.video_id || null;
+
+            epDocs.push({
+              book_id: collectionId,
+              collection_id: collectionId,
+              dramaId: collectionId,
+              episodeNumber: epNum,
+              video_id: vid,
+              title: v.title || `Episode ${epNum}`,
+              episodeCover: v.cover || normalized.coverUrl,
+              duration: v.duration || 0,
+              streamUrl: null,
+              syncStatus: 'PENDING',
+              errorMessage: null,
+            });
+          });
+        } else {
+          for (let i = 1; i <= totalEps; i++) {
+            epDocs.push({
+              book_id: collectionId,
+              collection_id: collectionId,
+              dramaId: collectionId,
+              episodeNumber: i,
+              title: `Episode ${i}`,
+              streamUrl: null,
+              syncStatus: 'PENDING',
+              errorMessage: null,
+            });
+          }
+        }
+
         if (epDocs.length > 0) {
-          await Episode.insertMany(epDocs, { ordered: false }).catch(() => {});
+          await EpisodeModel.insertMany(epDocs, { ordered: false }).catch(() => {});
         }
 
         newlyAddedList.push({
+          provider: targetProvider,
           dramaId: collectionId,
-          title: item.title,
-          coverUrl: item.coverUrl || item.cover || '',
+          title: normalized.title,
+          coverUrl: normalized.coverUrl,
           totalEpisodes: totalEps,
-          categories: dramaCats,
+          categories: normalized.categories,
         });
         totalNewEpisodesAdded += totalEps;
       } else {
         // Update existing
-        existingDrama.coverUrl = item.coverUrl || item.cover || existingDrama.coverUrl;
-        existingDrama.synopsis = item.synopsis || item.description || existingDrama.synopsis;
-        existingDrama.categories = Array.from(new Set([...existingDrama.categories, ...dramaCats]));
+        existingDrama.coverUrl = normalized.coverUrl || existingDrama.coverUrl;
+        if (normalized.synopsis) {
+          existingDrama.synopsis = normalized.synopsis;
+          if ('hasSynopsis' in existingDrama) (existingDrama as any).hasSynopsis = true;
+        }
+        existingDrama.categories = Array.from(new Set([...existingDrama.categories, ...normalized.categories]));
+
         if (totalEps > existingDrama.totalEpisodes) {
           const diff = totalEps - existingDrama.totalEpisodes;
           existingDrama.totalEpisodes = totalEps;
@@ -203,9 +817,9 @@ router.post('/sync/import-dramas', async (req: Request, res: Response) => {
           const epDocs = [];
           for (let i = existingDrama.totalEpisodes + 1; i <= totalEps; i++) {
             epDocs.push({
-              dramaId: collectionId,
+              book_id: collectionId,
               collection_id: collectionId,
-              episodeId: `${collectionId}_ep_${i}`,
+              dramaId: collectionId,
               episodeNumber: i,
               title: `Episode ${i}`,
               streamUrl: null,
@@ -214,7 +828,7 @@ router.post('/sync/import-dramas', async (req: Request, res: Response) => {
             });
           }
           if (epDocs.length > 0) {
-            await Episode.insertMany(epDocs, { ordered: false }).catch(() => {});
+            await EpisodeModel.insertMany(epDocs, { ordered: false }).catch(() => {});
           }
           totalNewEpisodesAdded += diff;
         }
@@ -222,27 +836,27 @@ router.post('/sync/import-dramas', async (req: Request, res: Response) => {
       }
     }
 
-    // Upsert Category Documents
+    // Upsert Categories
     for (const catName of categoriesFound) {
       const slug = catName.toLowerCase().replace(/[^a-z0-9]+/g, '-');
-      const count = await Drama.countDocuments({ categories: catName });
-      await Category.findOneAndUpdate(
+      const count = await DramaModel.countDocuments({ categories: catName });
+      await CategoryModel.findOneAndUpdate(
         { categoryId: slug },
         {
           categoryId: slug,
           name: catName,
           slug,
           totalTitles: count,
-          syncStatus: 'COMPLETED',
           lastSyncedAt: new Date(),
         },
         { upsert: true }
       );
     }
 
-    // Log newly added summary
+    // Log newly added
     if (newlyAddedList.length > 0) {
       await NewlyAddedLog.create({
+        provider: targetProvider,
         source: importSource,
         totalImported: newlyAddedList.length,
         totalNewEpisodes: totalNewEpisodesAdded,
@@ -251,13 +865,13 @@ router.post('/sync/import-dramas', async (req: Request, res: Response) => {
       });
 
       await syncWorker.addLog(
-        `✅ [NEWLY IMPORTED] ${newlyAddedList.length} new titles (+${totalNewEpisodesAdded} pending episodes) added to MongoDB Atlas from "${importSource}".`
+        `✅ [${targetProvider.toUpperCase()} IMPORTED] ${newlyAddedList.length} new titles (+${totalNewEpisodesAdded} pending episodes) saved to ${targetProvider}_dramas.`
       );
     }
 
     res.json({
       success: true,
-      message: `Imported ${newlyAddedList.length} new dramas (+${totalNewEpisodesAdded} episodes).`,
+      message: `Imported ${newlyAddedList.length} new dramas (+${totalNewEpisodesAdded} episodes) to ${targetProvider}.`,
       importedCount: newlyAddedList.length,
       totalNewEpisodes: totalNewEpisodesAdded,
     });
@@ -268,11 +882,16 @@ router.post('/sync/import-dramas', async (req: Request, res: Response) => {
 
 /**
  * GET /api/sync/newly-added
- * Returns history of newly imported dramas
  */
-router.get('/sync/newly-added', async (_req: Request, res: Response) => {
+router.get('/sync/newly-added', async (req: Request, res: Response) => {
   try {
-    const logs = await NewlyAddedLog.find().sort({ importedAt: -1 }).limit(30);
+    const { provider } = req.query;
+    const filter: any = {};
+    if (provider && provider !== 'all') {
+      filter.provider = provider as string;
+    }
+
+    const logs = await NewlyAddedLog.find(filter).sort({ importedAt: -1 }).limit(30);
     res.json({ success: true, count: logs.length, logs });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
@@ -285,15 +904,35 @@ router.get('/sync/newly-added', async (_req: Request, res: Response) => {
 router.get('/dramas/:dramaId', async (req: Request, res: Response) => {
   try {
     const { dramaId } = req.params;
-    const drama = await Drama.findOne({ $or: [{ dramaId }, { collection_id: dramaId }] });
+    const { provider } = req.query;
+
+    const filter = { $or: [{ dramaId }, { collection_id: dramaId }, { book_id: dramaId }] };
+
+    let drama: any = null;
+    let targetProvider = (provider as string) || 'pinedrama';
+
+    if (targetProvider === 'melolo') {
+      drama = await MeloloDrama.findOne(filter).lean();
+      if (drama) drama.provider = 'melolo';
+    } else if (targetProvider === 'pinedrama') {
+      drama = await PineDramaDrama.findOne(filter).lean();
+      if (drama) drama.provider = 'pinedrama';
+    } else {
+      drama = await PineDramaDrama.findOne(filter).lean();
+      if (drama) {
+        drama.provider = 'pinedrama';
+      } else {
+        drama = await MeloloDrama.findOne(filter).lean();
+        if (drama) drama.provider = 'melolo';
+      }
+    }
 
     if (!drama) {
       return res.status(404).json({ success: false, error: 'Drama not found' });
     }
 
-    const episodes = await Episode.find({
-      $or: [{ dramaId: drama.dramaId }, { collection_id: drama.dramaId }],
-    }).sort({ episodeNumber: 1 });
+    const EpisodeModel = getEpisodeModel(drama.provider);
+    const episodes = await EpisodeModel.find(filter).sort({ episodeNumber: 1 }).lean();
 
     res.json({
       success: true,
@@ -306,83 +945,92 @@ router.get('/dramas/:dramaId', async (req: Request, res: Response) => {
 });
 
 /**
- * GET /api/episodes/:dramaId/:episodeNumber/stream
+ * GET /api/dramas/:provider/:id/episodes
+ * Returns drama details and all associated episodes for a specific provider
  */
-router.get('/episodes/:dramaId/:episodeNumber/stream', async (req: Request, res: Response) => {
+router.get('/dramas/:provider/:id/episodes', async (req: Request, res: Response) => {
   try {
-    const { dramaId, episodeNumber } = req.params;
-    const epNum = parseInt(episodeNumber, 10);
+    const { provider, id } = req.params;
+    const targetProvider = provider === 'melolo' ? 'melolo' : 'pinedrama';
 
-    const episode = await Episode.findOne({
-      $or: [{ dramaId }, { collection_id: dramaId }],
-      episodeNumber: epNum,
-    });
+    const filter = { $or: [{ dramaId: id }, { collection_id: id }, { book_id: id }] };
+    const DramaModel = getDramaModel(targetProvider);
+    const EpisodeModel = getEpisodeModel(targetProvider);
 
-    if (episode && episode.syncStatus === 'SYNCED' && (episode.bestUrl || episode.streamUrl)) {
-      return res.json({
-        success: true,
-        streamUrl: episode.bestUrl || episode.streamUrl,
-        bestUrl: episode.bestUrl || episode.streamUrl,
-        videoId: episode.video_id,
-        quality: episode.quality,
-        backupUrls: episode.backupUrls || [],
-        syncStatus: 'SYNCED',
-        isOnDemand: false,
-        title: episode.title,
-      });
+    const drama = await DramaModel.findOne(filter).lean();
+    if (!drama) {
+      return res.status(404).json({ success: false, error: 'Drama not found' });
     }
 
-    const streamUrl = await syncWorker.fetchSingleEpisodeOnDemand(dramaId, epNum);
-
-    const updatedEp = await Episode.findOne({
-      $or: [{ dramaId }, { collection_id: dramaId }],
-      episodeNumber: epNum,
-    });
+    const episodes = await EpisodeModel.find(filter).sort({ episodeNumber: 1 }).lean();
 
     res.json({
       success: true,
-      streamUrl,
-      bestUrl: updatedEp?.bestUrl || streamUrl,
-      videoId: updatedEp?.video_id || null,
-      quality: updatedEp?.quality || 'HD_INDO',
-      backupUrls: updatedEp?.backupUrls || [streamUrl],
-      syncStatus: 'SYNCED',
-      isOnDemand: true,
+      drama: { ...drama, provider: targetProvider },
+      count: episodes.length,
+      episodes,
     });
   } catch (err: any) {
-    res.status(500).json({
-      success: false,
-      error: err.message || 'Failed to retrieve episode stream URL',
-    });
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 
 /**
  * GET /api/sync/next-pending-episodes
+ * Returns next pending episodes across provider queues
  */
 router.get('/sync/next-pending-episodes', async (req: Request, res: Response) => {
   try {
     const limit = parseInt((req.query.limit as string) || '10', 10);
     const collectionId = req.query.collection_id as string;
+    const provider = (req.query.provider as string) || 'all';
 
-    const filter: any = { syncStatus: { $in: ['PENDING', 'FAILED'] } };
-    if (collectionId) {
-      filter.$or = [{ dramaId: collectionId }, { collection_id: collectionId }];
+    const formatted: any[] = [];
+
+    const fetchPendingFrom = async (prov: 'pinedrama' | 'melolo') => {
+      const EpisodeModel = getEpisodeModel(prov);
+      const DramaModel = getDramaModel(prov);
+
+      const filter: any = { syncStatus: { $in: ['PENDING', 'FAILED'] } };
+      if (collectionId) {
+        filter.$or = [{ dramaId: collectionId }, { collection_id: collectionId }, { book_id: collectionId }];
+      }
+
+      const list = await EpisodeModel.find(filter)
+        .sort({ dramaId: 1, episodeNumber: 1 })
+        .limit(limit)
+        .lean();
+
+      for (const ep of list) {
+        const id = ep.book_id || ep.collection_id || ep.dramaId;
+        const dramaDoc = await DramaModel.findOne({ $or: [{ dramaId: id }, { collection_id: id }, { book_id: id }] }).lean();
+
+        formatted.push({
+          provider: prov,
+          dramaId: id,
+          collection_id: id,
+          episodeNumber: ep.episodeNumber,
+          video_id: ep.video_id || null,
+          title: ep.title || `Episode ${ep.episodeNumber}`,
+          dramaTitle: dramaDoc?.title || id,
+          coverUrl: dramaDoc?.coverUrl || '',
+        });
+      }
+    };
+
+    if (provider === 'melolo') {
+      await fetchPendingFrom('melolo');
+    } else if (provider === 'pinedrama') {
+      await fetchPendingFrom('pinedrama');
+    } else {
+      // 'all' or 'alternating'
+      await fetchPendingFrom('melolo');
+      if (formatted.length < limit) {
+        await fetchPendingFrom('pinedrama');
+      }
     }
 
-    const pendingList = await Episode.find(filter)
-      .sort({ dramaId: 1, episodeNumber: 1 })
-      .limit(limit)
-      .lean();
-
-    const formatted = pendingList.map((ep) => ({
-      dramaId: ep.dramaId,
-      collection_id: ep.collection_id || ep.dramaId,
-      episodeNumber: ep.episodeNumber,
-      title: ep.title,
-    }));
-
-    res.json({ success: true, count: formatted.length, pendingEpisodes: formatted });
+    res.json({ success: true, count: formatted.length, pendingEpisodes: formatted.slice(0, limit) });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -390,10 +1038,12 @@ router.get('/sync/next-pending-episodes', async (req: Request, res: Response) =>
 
 /**
  * POST /api/sync/save-episode
+ * Saves episode stream data into isolated collection
  */
 router.post('/sync/save-episode', async (req: Request, res: Response) => {
   try {
-    const { collection_id, dramaId, episodeNumber, rawResponse, syncStatus, errorMessage } = req.body;
+    const { provider, collection_id, dramaId, episodeNumber, video_id, rawResponse, syncStatus, errorMessage, streamUrl, qualities } = req.body;
+    const targetProvider = provider === 'melolo' ? 'melolo' : 'pinedrama';
     const targetDramaId = collection_id || dramaId;
     const epNum = parseInt(episodeNumber, 10);
 
@@ -401,68 +1051,90 @@ router.post('/sync/save-episode', async (req: Request, res: Response) => {
       return res.status(400).json({ success: false, error: 'collection_id and episodeNumber required' });
     }
 
+    const EpisodeModel = getEpisodeModel(targetProvider);
+    const DramaModel = getDramaModel(targetProvider);
+
+    const epFilter = targetProvider === 'melolo'
+      ? { $or: [{ book_id: targetDramaId }, { collection_id: targetDramaId }, { dramaId: targetDramaId }], episodeNumber: epNum }
+      : { $or: [{ collection_id: targetDramaId }, { dramaId: targetDramaId }], episodeNumber: epNum };
+
     if (rawResponse) {
-      const parsed = parseEpisodeResponse(rawResponse, epNum);
+      const normalized = normalizeEpisodeResponse(rawResponse, targetProvider, epNum);
+      const status = normalized.best_url ? 'SYNCED' : 'FAILED';
+      const err = normalized.error || errorMessage || null;
 
-      const status = parsed.best_url ? 'SYNCED' : 'FAILED';
-      const err = parsed.error || errorMessage || null;
+      const updatePayload: any = {
+        provider: targetProvider,
+        collection_id: targetDramaId,
+        dramaId: targetDramaId,
+        episodeNumber: epNum,
+        video_id: normalized.video_id || video_id || null,
+        title: normalized.title,
+        bestUrl: normalized.best_url,
+        streamUrl: normalized.best_url,
+        quality: normalized.quality || '720p',
+        backupUrls: normalized.backup_urls,
+        syncStatus: status,
+        errorMessage: err,
+        lastSyncedAt: new Date(),
+      };
 
-      await Episode.findOneAndUpdate(
-        { $or: [{ dramaId: targetDramaId }, { collection_id: targetDramaId }], episodeNumber: epNum },
-        {
-          dramaId: targetDramaId,
-          collection_id: targetDramaId,
-          episodeNumber: epNum,
-          video_id: parsed.video_id,
-          title: parsed.title,
-          bestUrl: parsed.best_url,
-          streamUrl: parsed.best_url,
-          quality: parsed.quality || 'HD_INDO',
-          backupUrls: parsed.backup_urls,
-          syncStatus: status,
-          errorMessage: err,
-          lastSyncedAt: new Date(),
-        },
-        { upsert: true }
-      );
-
-      await syncWorker.recalculateDramaCounts(targetDramaId);
-
-      const dramaDoc = await Drama.findOne({ dramaId: targetDramaId });
-      const dramaTitle = dramaDoc ? dramaDoc.title : targetDramaId;
-
-      if (parsed.best_url) {
-        await syncWorker.addLog(`✔ [BROWSER SYNCED] "${dramaTitle}" Ep ${epNum} -> ${parsed.best_url.slice(0, 45)}...`);
+      if (targetProvider === 'melolo') {
+        updatePayload.book_id = targetDramaId;
+        if (rawResponse.qualities) {
+          updatePayload.qualities = rawResponse.qualities;
+        }
       } else {
-        await syncWorker.addLog(`✖ [BROWSER SYNC FAILED] "${dramaTitle}" Ep ${epNum}: ${err || 'No stream URL'}`);
+        delete updatePayload.book_id;
       }
 
-      return res.json({ success: true, message: `Episode ${epNum} saved successfully.` });
+      await EpisodeModel.findOneAndUpdate(epFilter, updatePayload, { upsert: true, new: true, strict: false });
+      await syncWorker.recalculateDramaCounts(targetDramaId, targetProvider);
+
+      const dramaDoc = await DramaModel.findOne(
+        targetProvider === 'melolo'
+          ? { $or: [{ book_id: targetDramaId }, { collection_id: targetDramaId }, { dramaId: targetDramaId }] }
+          : { $or: [{ collection_id: targetDramaId }, { dramaId: targetDramaId }] }
+      );
+      const dramaTitle = dramaDoc ? dramaDoc.title : targetDramaId;
+
+      if (normalized.best_url) {
+        await syncWorker.addLog(`✔ [${targetProvider.toUpperCase()} SYNCED] "${dramaTitle}" Ep ${epNum} -> ${normalized.best_url.slice(0, 45)}...`);
+      } else {
+        await syncWorker.addLog(`✖ [${targetProvider.toUpperCase()} FAILED] "${dramaTitle}" Ep ${epNum}: ${err || 'No stream URL'}`);
+      }
+
+      return res.json({ success: true, message: `Episode ${epNum} saved.` });
     } else {
-      const { bestUrl, streamUrl, video_id, quality, backupUrls, title } = req.body;
-      const finalUrl = bestUrl || streamUrl || null;
+      const finalUrl = streamUrl || null;
       const status = syncStatus || (finalUrl ? 'SYNCED' : 'FAILED');
 
-      await Episode.findOneAndUpdate(
-        { $or: [{ dramaId: targetDramaId }, { collection_id: targetDramaId }], episodeNumber: epNum },
-        {
-          dramaId: targetDramaId,
-          collection_id: targetDramaId,
-          episodeNumber: epNum,
-          video_id: video_id || null,
-          title: title || `Episode ${epNum}`,
-          bestUrl: finalUrl,
-          streamUrl: finalUrl,
-          quality: quality || 'HD_INDO',
-          backupUrls: backupUrls || (finalUrl ? [finalUrl] : []),
-          syncStatus: status,
-          errorMessage: errorMessage || null,
-          lastSyncedAt: new Date(),
-        },
-        { upsert: true }
-      );
+      const updatePayload: any = {
+        provider: targetProvider,
+        collection_id: targetDramaId,
+        dramaId: targetDramaId,
+        episodeNumber: epNum,
+        video_id: video_id || null,
+        bestUrl: finalUrl,
+        streamUrl: finalUrl,
+        backupUrls: finalUrl ? [finalUrl] : [],
+        syncStatus: status,
+        errorMessage: errorMessage || null,
+        lastSyncedAt: new Date(),
+      };
 
-      await syncWorker.recalculateDramaCounts(targetDramaId);
+      if (targetProvider === 'melolo') {
+        updatePayload.book_id = targetDramaId;
+        if (Array.isArray(qualities)) {
+          updatePayload.qualities = qualities;
+        }
+      } else {
+        delete updatePayload.book_id;
+      }
+
+      await EpisodeModel.findOneAndUpdate(epFilter, updatePayload, { upsert: true, new: true, strict: false });
+      await syncWorker.recalculateDramaCounts(targetDramaId, targetProvider);
+
       return res.json({ success: true, message: `Episode ${epNum} updated.` });
     }
   } catch (err: any) {
@@ -473,14 +1145,30 @@ router.post('/sync/save-episode', async (req: Request, res: Response) => {
 /**
  * GET /api/sync/status
  */
-router.get('/sync/status', async (_req: Request, res: Response) => {
+router.get('/sync/status', async (req: Request, res: Response) => {
   try {
+    const { provider } = req.query;
+    const targetProvider = (provider as string) || 'all';
     const state = await syncWorker.getState();
 
-    const totalCategories = await Category.countDocuments();
-    const totalDramas = await Drama.countDocuments();
-    const syncedEpisodes = await Episode.countDocuments({ syncStatus: 'SYNCED' });
-    const pendingEpisodes = await Episode.countDocuments({ syncStatus: { $ne: 'SYNCED' } });
+    let totalCategories = 0;
+    let totalDramas = 0;
+    let syncedEpisodes = 0;
+    let pendingEpisodes = 0;
+
+    if (targetProvider === 'all' || targetProvider === 'pinedrama') {
+      totalCategories += await PineDramaCategory.countDocuments();
+      totalDramas += await PineDramaDrama.countDocuments();
+      syncedEpisodes += await PineDramaEpisode.countDocuments({ syncStatus: 'SYNCED' });
+      pendingEpisodes += await PineDramaEpisode.countDocuments({ syncStatus: { $ne: 'SYNCED' } });
+    }
+
+    if (targetProvider === 'all' || targetProvider === 'melolo') {
+      totalCategories += await MeloloCategory.countDocuments();
+      totalDramas += await MeloloDrama.countDocuments();
+      syncedEpisodes += await MeloloEpisode.countDocuments({ syncStatus: 'SYNCED' });
+      pendingEpisodes += await MeloloEpisode.countDocuments({ syncStatus: { $ne: 'SYNCED' } });
+    }
 
     res.json({
       success: true,
@@ -498,51 +1186,32 @@ router.get('/sync/status', async (_req: Request, res: Response) => {
 });
 
 /**
- * POST /api/sync/categories
+ * POST /api/test-endpoint
  */
-router.post('/sync/categories', async (_req: Request, res: Response) => {
+router.post('/test-endpoint', async (req: Request, res: Response) => {
   try {
-    await syncWorker.triggerSyncCategoriesAndTitles();
-    res.json({ success: true, message: 'Stage 1 Category & Drama Sync triggered.' });
-  } catch (err: any) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
+    const { endpointPath, params } = req.body;
+    if (!endpointPath) {
+      return res.status(400).json({ success: false, error: 'Endpoint path required' });
+    }
 
-/**
- * POST /api/sync/drama/:dramaId
- */
-router.post('/sync/drama/:dramaId', async (req: Request, res: Response) => {
-  try {
-    const { dramaId } = req.params;
-    await syncWorker.prioritizeDrama(dramaId);
-    res.json({ success: true, message: `Drama ${dramaId} set as sync priority.` });
+    const testRes = await sansekaiApi.testEndpoint(endpointPath, params || {});
+    res.json({
+      success: true,
+      status: testRes.status,
+      fullUrl: testRes.fullUrl,
+      headers: testRes.headers,
+      data: testRes.data,
+    });
   } catch (err: any) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-/**
- * POST /api/sync/episodes/resume
- */
-router.post('/sync/episodes/resume', async (_req: Request, res: Response) => {
-  try {
-    await syncWorker.resume();
-    res.json({ success: true, message: 'Background episode sync worker resumed.' });
-  } catch (err: any) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-/**
- * POST /api/sync/pause
- */
-router.post('/sync/pause', async (_req: Request, res: Response) => {
-  try {
-    await syncWorker.pause();
-    res.json({ success: true, message: 'Background worker paused.' });
-  } catch (err: any) {
-    res.status(500).json({ success: false, error: err.message });
+    const errInfo = sansekaiApi.formatError(err);
+    res.json({
+      success: false,
+      error: errInfo.message,
+      status: errInfo.status,
+      fullUrl: errInfo.fullUrl,
+      dataSnippet: errInfo.dataSnippet,
+    });
   }
 });
 

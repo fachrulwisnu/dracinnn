@@ -14,25 +14,29 @@ import {
   RefreshCw,
   Video,
 } from 'lucide-react';
+import { resolveCoverUrl, handleImageError } from '../utils/imageUtils';
 
 interface EpisodeItem {
   episodeNumber: number;
-  title: string;
+  title?: string;
   bestUrl?: string | null;
   streamUrl?: string | null;
   video_id?: string | null;
+  vid?: string | null;
   quality?: string | null;
   backupUrls?: string[];
   syncStatus: string;
 }
 
 interface DramaDetail {
+  provider?: string;
   dramaId: string;
   collection_id?: string;
+  book_id?: string;
   title: string;
   coverUrl: string;
-  synopsis: string;
-  categories: string[];
+  synopsis?: string;
+  categories?: string[];
   totalEpisodes: number;
   syncedEpisodesCount: number;
   pendingEpisodesCount: number;
@@ -47,17 +51,19 @@ interface VideoPlayerModalProps {
 
 export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
   drama,
-  episodes,
+  episodes: initialEpisodes,
   onClose,
   onFetchOnDemand,
 }) => {
+  const [episodes, setEpisodes] = useState<EpisodeItem[]>(initialEpisodes || []);
   const [currentEpisodeNum, setCurrentEpisodeNum] = useState<number>(1);
   const [activeMirrorIndex, setActiveMirrorIndex] = useState<number>(0);
   const [availableMirrors, setAvailableMirrors] = useState<string[]>([]);
-  const [activeQuality, setActiveQuality] = useState<string>('HD_INDO');
+  const [activeQuality, setActiveQuality] = useState<string>('720p');
   const [activeVideoId, setActiveVideoId] = useState<string | null>(null);
 
   const [isLoadingStream, setIsLoadingStream] = useState<boolean>(false);
+  const [loadingText, setLoadingText] = useState<string>('Loading stream...');
   const [copiedUrl, setCopiedUrl] = useState<boolean>(false);
   const [playerError, setPlayerError] = useState<string | null>(null);
 
@@ -66,10 +72,10 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
 
   if (!drama) return null;
 
-  const currentEpisode = episodes.find((e) => e.episodeNumber === currentEpisodeNum);
-  const targetCollectionId = drama.collection_id || drama.dramaId;
+  const provider = (drama.provider || 'pinedrama') === 'melolo' ? 'melolo' : 'pinedrama';
+  const targetCollectionId = drama.book_id || drama.collection_id || drama.dramaId;
 
-  // Load stream for episode
+  // Load stream for episode (Part 2 Fix)
   const loadEpisodeStream = async (epNum: number) => {
     setCurrentEpisodeNum(epNum);
     setPlayerError(null);
@@ -77,77 +83,149 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
 
     const ep = episodes.find((e) => e.episodeNumber === epNum);
 
+    // If already synced, play immediately!
     if (ep && ep.syncStatus === 'SYNCED' && (ep.bestUrl || ep.streamUrl)) {
       const best = ep.bestUrl || ep.streamUrl || '';
       const mirrors = Array.from(new Set([best, ...(ep.backupUrls || [])])).filter(Boolean);
-      setAvailableMirrors(mirrors);
-      setActiveQuality(ep.quality || 'HD_INDO');
-      setActiveVideoId(ep.video_id || null);
+      setAvailableMirrors(mirrors as string[]);
+      setActiveQuality(ep.quality || '720p');
+      setActiveVideoId(ep.video_id || ep.vid || null);
       return;
     }
 
-    // Pending / On-demand fetch needed via direct browser call
+    // On-Demand fetch required!
     setIsLoadingStream(true);
-    try {
-      // 1. Direct browser fetch to Sansekai API to bypass backend 403
-      const directUrl = `https://api.sansekai.my.id/api/pinedrama/get-episode?collection_id=${targetCollectionId}&episodeNumber=${epNum}&lang=id`;
-      let resData = null;
 
-      try {
-        const res = await fetch(directUrl, {
-          method: 'GET',
+    try {
+      if (provider === 'melolo') {
+        // Melolo Pipeline Fix
+        setLoadingText(`On-Demand Syncing Melolo Ep ${epNum}...`);
+
+        let vid = ep?.video_id || ep?.vid || null;
+
+        // Step 1: If video_id is missing, fetch detail to resolve vid
+        if (!vid) {
+          setLoadingText(`Fetching Melolo detail to resolve vid for Ep ${epNum}...`);
+          const detailRes = await fetch(`https://api.sansekai.my.id/api/melolo/detail?book_id=${targetCollectionId}&lang=id`, {
+            headers: { Accept: '*/*' },
+            referrerPolicy: 'no-referrer',
+          });
+
+          if (detailRes.ok) {
+            const detailJson = await detailRes.json();
+            await fetch('/api/dramas/update-melolo-detail', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ collection_id: targetCollectionId, rawDetail: detailJson }),
+            });
+
+            // Re-fetch episode list
+            const freshRes = await fetch(`/api/dramas/melolo/${targetCollectionId}/episodes`);
+            const freshData = await freshRes.json();
+            if (freshData.episodes) {
+              setEpisodes(freshData.episodes);
+              const matched = freshData.episodes.find((e: any) => e.episodeNumber === epNum);
+              vid = matched?.video_id || matched?.vid || null;
+            }
+          }
+        }
+
+        if (!vid) {
+          throw new Error(`Tidak dapat menemukan video_id (vid) untuk Melolo Episode ${epNum}.`);
+        }
+
+        // Step 2: Fetch stream using videoId
+        setLoadingText(`Fetching direct Melolo stream for videoId: ${vid}...`);
+        const streamUrl = `https://api.sansekai.my.id/api/melolo/get-episode?videoId=${vid}`;
+        const streamRes = await fetch(streamUrl, {
           headers: { Accept: '*/*' },
           referrerPolicy: 'no-referrer',
-          credentials: 'omit',
         });
-        if (res.ok) {
-          resData = await res.json();
-        }
-      } catch (err) {
-        // Fallback to backend on-demand endpoint
-        resData = null;
-      }
 
-      if (resData) {
-        // Post payload to save in MongoDB
+        if (!streamRes.ok) {
+          throw new Error(`HTTP ${streamRes.status} fetching Melolo stream.`);
+        }
+
+        const jsonPayload = await streamRes.json();
+        const best = jsonPayload.streamUrl || jsonPayload.qualities?.[0]?.streamUrl;
+
+        if (!best) {
+          throw new Error('Link stream URL tidak ditemukan dalam respons Melolo.');
+        }
+
+        // Save to DB
         await fetch('/api/sync/save-episode', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
+            provider: 'melolo',
             collection_id: targetCollectionId,
             episodeNumber: epNum,
-            rawResponse: resData,
+            video_id: vid,
+            rawResponse: jsonPayload,
           }),
         });
 
-        const best = resData.best_url || resData.main?.indo_cdn_urls?.[0];
-        const allUrls = [
-          best,
-          ...(resData.alt?.indo_hd_cdn_urls || []),
-          ...(resData.main?.indo_cdn_urls || []),
-          ...(resData.alt?.indo_cdn_urls || []),
-        ].filter((u, idx, arr) => u && typeof u === 'string' && u.startsWith('http') && arr.indexOf(u) === idx);
+        const mirrors = Array.from(
+          new Set([best, ...(jsonPayload.qualities || []).map((q: any) => q.streamUrl)])
+        ).filter(Boolean) as string[];
 
-        setAvailableMirrors(allUrls);
-        setActiveQuality(resData.quality || 'HD_INDO');
-        setActiveVideoId(resData.video_id || null);
+        setAvailableMirrors(mirrors);
+        setActiveQuality(jsonPayload.definition || '720p');
+        setActiveVideoId(vid);
       } else {
-        // Fallback to backend route
-        const backendData = await onFetchOnDemand(targetCollectionId, epNum);
-        const best = backendData.bestUrl || backendData.streamUrl;
-        const mirrors = Array.from(new Set([best, ...(backendData.backupUrls || [])])).filter(Boolean);
-        setAvailableMirrors(mirrors as string[]);
-        setActiveQuality(backendData.quality || 'HD_INDO');
-        setActiveVideoId(backendData.videoId || null);
+        // PineDrama Pipeline
+        setLoadingText(`On-Demand Syncing PineDrama Ep ${epNum}...`);
+        const streamUrl = `https://api.sansekai.my.id/api/pinedrama/get-episode?collection_id=${targetCollectionId}&episodeNumber=${epNum}&lang=id`;
+        const streamRes = await fetch(streamUrl, {
+          headers: { Accept: '*/*' },
+          referrerPolicy: 'no-referrer',
+        });
+
+        if (!streamRes.ok) {
+          throw new Error(`HTTP ${streamRes.status} fetching PineDrama stream.`);
+        }
+
+        const jsonPayload = await streamRes.json();
+        const best = jsonPayload.best_url || jsonPayload.streamUrl || jsonPayload.main?.indo_cdn_urls?.[0];
+
+        if (!best) {
+          throw new Error('Link stream URL tidak ditemukan dalam respons PineDrama.');
+        }
+
+        await fetch('/api/sync/save-episode', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            provider: 'pinedrama',
+            collection_id: targetCollectionId,
+            episodeNumber: epNum,
+            video_id: ep?.video_id,
+            rawResponse: jsonPayload,
+          }),
+        });
+
+        const mirrors = Array.from(
+          new Set([
+            best,
+            ...(jsonPayload.backup_urls || []),
+            ...(jsonPayload.alt?.indo_hd_cdn_urls || []),
+            ...(jsonPayload.main?.indo_cdn_urls || []),
+          ])
+        ).filter(Boolean) as string[];
+
+        setAvailableMirrors(mirrors);
+        setActiveQuality(jsonPayload.quality || 'HD_INDO');
+        setActiveVideoId(ep?.video_id || null);
       }
     } catch (err: any) {
-      setPlayerError(err.message || 'Failed to stream episode on-demand.');
+      setPlayerError(err.message || 'Gagal memutar video episode.');
     } finally {
       setIsLoadingStream(false);
     }
   };
 
-  // Auto load episode 1 or first synced episode on mount
+  // Auto load episode on mount
   useEffect(() => {
     if (episodes.length > 0) {
       const firstSynced = episodes.find((e) => e.syncStatus === 'SYNCED') || episodes[0];
@@ -170,10 +248,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     const isHlsUrl = currentActiveUrl.includes('.m3u8');
 
     if (isHlsUrl && Hls.isSupported()) {
-      const hls = new Hls({
-        enableWorker: true,
-        lowLatencyMode: true,
-      });
+      const hls = new Hls({ enableWorker: true, lowLatencyMode: true });
       hlsRef.current = hls;
       hls.loadSource(currentActiveUrl);
       hls.attachMedia(video);
@@ -193,13 +268,11 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
     };
   }, [currentActiveUrl]);
 
-  // Video error handler -> Auto switch to next mirror!
   const handleVideoError = () => {
     if (availableMirrors.length > 1 && activeMirrorIndex < availableMirrors.length - 1) {
-      console.warn(`[Video Error] Mirror ${activeMirrorIndex + 1} failed. Auto-switching to Mirror ${activeMirrorIndex + 2}...`);
       setActiveMirrorIndex((prev) => prev + 1);
     } else {
-      setPlayerError('Stream error on all mirror URLs. Please try selecting another mirror or episode.');
+      setPlayerError('Stream error on all mirror URLs.');
     }
   };
 
@@ -221,14 +294,13 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
           <X className="w-5 h-5" />
         </button>
 
-        {/* LEFT COLUMN: 9:16 Vertical Smartphone Video Player Container */}
+        {/* LEFT COLUMN: 9:16 Vertical Video Player Container */}
         <div className="w-full lg:w-1/2 bg-slate-950 p-4 sm:p-6 flex flex-col items-center justify-center border-b lg:border-b-0 lg:border-r border-slate-800">
           <div className="relative w-full max-w-[320px] aspect-[9/16] bg-black rounded-3xl overflow-hidden shadow-2xl border-4 border-slate-800 flex items-center justify-center">
             {isLoadingStream ? (
               <div className="flex flex-col items-center gap-3 p-6 text-center">
                 <Loader2 className="w-10 h-10 text-amber-400 animate-spin" />
-                <div className="text-sm font-bold text-amber-300">On-Demand Syncing Ep {currentEpisodeNum}...</div>
-                <div className="text-xs text-slate-400">Fetching direct stream from TikTok CDN...</div>
+                <div className="text-sm font-bold text-amber-300">{loadingText}</div>
               </div>
             ) : playerError ? (
               <div className="flex flex-col items-center gap-3 p-6 text-center text-rose-300">
@@ -248,11 +320,11 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
               <div className="text-xs text-slate-500 italic">Select an episode to play</div>
             )}
 
-            {/* Quality & Video ID Badges Overlay */}
+            {/* Quality & Video ID Badges */}
             {currentActiveUrl && !isLoadingStream && (
               <div className="absolute top-3 left-3 flex flex-col gap-1 items-start pointer-events-none">
                 <span className="px-2 py-0.5 rounded-md bg-slate-950/80 text-amber-400 border border-amber-500/30 text-[10px] font-mono font-bold backdrop-blur-md">
-                  {activeQuality || 'HD_INDO'}
+                  {activeQuality || '720p'}
                 </span>
                 {activeVideoId && (
                   <span className="px-2 py-0.5 rounded-md bg-slate-950/80 text-slate-300 border border-slate-700/50 text-[9px] font-mono backdrop-blur-md">
@@ -268,7 +340,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
             <button
               onClick={() => loadEpisodeStream(Math.max(1, currentEpisodeNum - 1))}
               disabled={currentEpisodeNum <= 1 || isLoadingStream}
-              className="flex items-center gap-1 hover:text-white disabled:opacity-30 cursor-pointer"
+              className="flex items-center gap-1 hover:text-white disabled:opacity-30 cursor-pointer font-bold"
             >
               <ChevronLeft className="w-4 h-4" /> Prev
             </button>
@@ -278,33 +350,33 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
             <button
               onClick={() => loadEpisodeStream(Math.min(drama.totalEpisodes, currentEpisodeNum + 1))}
               disabled={currentEpisodeNum >= drama.totalEpisodes || isLoadingStream}
-              className="flex items-center gap-1 hover:text-white disabled:opacity-30 cursor-pointer"
+              className="flex items-center gap-1 hover:text-white disabled:opacity-30 cursor-pointer font-bold"
             >
               Next <ChevronRight className="w-4 h-4" />
             </button>
           </div>
         </div>
 
-        {/* RIGHT COLUMN: Interactive Mirror Selector & Episode Drawer */}
+        {/* RIGHT COLUMN: Mirrors & Episode Grid */}
         <div className="w-full lg:w-1/2 p-6 flex flex-col justify-between overflow-y-auto space-y-6">
           <div className="space-y-4">
             <div>
               <div className="text-xs font-bold uppercase tracking-wider text-amber-400 flex items-center gap-2">
                 <Video className="w-4 h-4" />
-                <span>TikTok CDN Player · {activeQuality}</span>
+                <span>[{provider.toUpperCase()}] Streaming Player · {activeQuality}</span>
               </div>
               <h2 className="text-2xl font-black text-white mt-1">{drama.title}</h2>
               <div className="text-xs text-slate-400 mt-1 flex items-center gap-2">
-                <span>{drama.categories?.join(', ')}</span>
-                <span aria-hidden="true">·</span>
+                <span>{drama.categories?.join(', ') || 'General'}</span>
+                <span>·</span>
                 <span>{drama.syncedEpisodesCount} Ready / {drama.pendingEpisodesCount} Pending</span>
               </div>
             </div>
 
-            {/* Mirror Selector Buttons */}
+            {/* Mirror Selector */}
             {availableMirrors.length > 0 && (
               <div className="space-y-2">
-                <div className="text-xs font-bold text-slate-300">CDN Mirror Fallbacks ({availableMirrors.length})</div>
+                <div className="text-xs font-bold text-slate-300">CDN Mirrors ({availableMirrors.length})</div>
                 <div className="flex items-center gap-2 overflow-x-auto pb-1">
                   {availableMirrors.map((url, idx) => (
                     <button
@@ -319,7 +391,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
                           : 'bg-slate-950 border border-slate-800 text-slate-300 hover:bg-slate-800'
                       }`}
                     >
-                      {idx === 0 ? 'Best URL (HD)' : `Mirror ${idx + 1}`}
+                      {idx === 0 ? 'Best Stream' : `Mirror ${idx + 1}`}
                     </button>
                   ))}
                 </div>
@@ -351,7 +423,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
             </div>
           </div>
 
-          {/* Interactive Episode Grid */}
+          {/* Episode Grid */}
           <div className="space-y-3 pt-2">
             <div className="flex items-center justify-between text-xs">
               <span className="font-bold text-white uppercase tracking-wider">Episode Selector</span>

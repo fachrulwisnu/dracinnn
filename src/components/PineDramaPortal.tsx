@@ -94,9 +94,9 @@ export const PineDramaPortal: React.FC<PineDramaPortalProps> = ({
             All Categories
           </button>
 
-          {categories.map((cat) => (
+          {categories.map((cat, idx) => (
             <button
-              key={cat.categoryId}
+              key={`${(cat as any).provider || "pine"}-${cat.categoryId || idx}-${idx}`}
               onClick={() => onSelectCategory(cat.categoryId)}
               className={`px-4 py-2 rounded-xl text-xs font-semibold whitespace-nowrap transition-all cursor-pointer ${
                 selectedCategory === cat.categoryId

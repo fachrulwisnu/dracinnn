@@ -1,13 +1,15 @@
 import mongoose, { Schema, Document } from 'mongoose';
 
 export interface IEpisode extends Document {
+  provider: 'pinedrama';
   dramaId: string; // collection_id
-  collection_id: string; // alias
-  episodeNumber: number; // episode_num
+  collection_id: string;
+  book_id?: string;
+  episodeNumber: number;
   video_id?: string | null;
   title: string;
   bestUrl: string | null;
-  streamUrl: string | null; // alias for bestUrl
+  streamUrl: string | null;
   quality?: string | null;
   backupUrls: string[];
   syncStatus: 'PENDING' | 'SYNCED' | 'FAILED';
@@ -18,8 +20,10 @@ export interface IEpisode extends Document {
 
 const EpisodeSchema = new Schema<IEpisode>(
   {
+    provider: { type: String, default: 'pinedrama', index: true },
     dramaId: { type: String, required: true, index: true },
     collection_id: { type: String, index: true },
+    book_id: { type: String },
     episodeNumber: { type: Number, required: true, index: true },
     video_id: { type: String, default: null },
     title: { type: String, default: '' },
@@ -39,10 +43,12 @@ const EpisodeSchema = new Schema<IEpisode>(
   {
     timestamps: true,
     collection: 'pinedrama_episodes',
+    strict: false,
   }
 );
 
-// Unique compound index per drama & episode number
+// Compound index for collection_id + episodeNumber
 EpisodeSchema.index({ dramaId: 1, episodeNumber: 1 }, { unique: true });
 
 export const Episode = mongoose.models.Episode || mongoose.model<IEpisode>('Episode', EpisodeSchema);
+export const PineDramaEpisode = Episode;

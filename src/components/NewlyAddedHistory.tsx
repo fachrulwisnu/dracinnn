@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Sparkles, Calendar, Layers, Play, CheckCircle2, RefreshCw, Film } from 'lucide-react';
+import { resolveCoverUrl, handleImageError } from '../utils/imageUtils';
 
 interface NewlyAddedDrama {
   dramaId: string;
@@ -122,13 +123,11 @@ export const NewlyAddedHistory: React.FC<NewlyAddedHistoryProps> = ({
                     >
                       <div className="flex items-center gap-3 overflow-hidden">
                         <img
-                          src={drama.coverUrl || 'https://via.placeholder.com/80x110'}
+                          src={resolveCoverUrl(drama.coverUrl)}
                           alt={drama.title}
                           className="w-10 h-14 object-cover rounded-lg bg-slate-950 shrink-0"
                           referrerPolicy="no-referrer"
-                          onError={(e) => {
-                            (e.target as HTMLElement).style.display = 'none';
-                          }}
+                          onError={(e) => handleImageError(e, drama.coverUrl)}
                         />
                         <div className="overflow-hidden">
                           <div className="text-xs font-bold text-white truncate">{drama.title}</div>

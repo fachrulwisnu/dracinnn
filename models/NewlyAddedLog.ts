@@ -1,6 +1,7 @@
 import mongoose, { Schema, Document } from 'mongoose';
 
 export interface INewlyAddedDrama {
+  provider: string;
   dramaId: string;
   title: string;
   coverUrl?: string;
@@ -9,7 +10,8 @@ export interface INewlyAddedDrama {
 }
 
 export interface INewlyAddedLog extends Document {
-  source: string; // e.g. 'Trending (Page 1-3)', 'Category: Romansa'
+  provider: string;
+  source: string;
   totalImported: number;
   totalNewEpisodes: number;
   dramas: INewlyAddedDrama[];
@@ -18,11 +20,13 @@ export interface INewlyAddedLog extends Document {
 
 const NewlyAddedLogSchema = new Schema<INewlyAddedLog>(
   {
+    provider: { type: String, default: 'pinedrama' },
     source: { type: String, required: true },
     totalImported: { type: Number, required: true },
     totalNewEpisodes: { type: Number, required: true },
     dramas: [
       {
+        provider: { type: String, default: 'pinedrama' },
         dramaId: { type: String, required: true },
         title: { type: String, required: true },
         coverUrl: { type: String, default: '' },

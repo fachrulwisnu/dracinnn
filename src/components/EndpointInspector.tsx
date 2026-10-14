@@ -1,30 +1,46 @@
 import React, { useState } from 'react';
-import { Send, Terminal, Code, CheckCircle2, AlertCircle, RefreshCw } from 'lucide-react';
+import { Send, Terminal, Code, CheckCircle2, AlertCircle, RefreshCw, Globe } from 'lucide-react';
 
-interface EndpointInspectorProps {
-  onEndpointsUpdated?: (endpoints: any) => void;
-}
-
-export const EndpointInspector: React.FC<EndpointInspectorProps> = () => {
-  const [endpoints, setEndpoints] = useState({
-    forYou: '/pinedrama/foryou',
-    trending: '/pinedrama/trending',
-    search: '/pinedrama/search',
-    detail: '/pinedrama/detail',
-    getEpisode: '/pinedrama/get-episode',
-  });
-
-  const [selectedEndpoint, setSelectedEndpoint] = useState<string>('/pinedrama/foryou');
-  const [queryParams, setQueryParams] = useState<string>('cursor=1&lang=id');
-  const [testMode, setTestMode] = useState<'backend' | 'browser'>('backend');
+export const EndpointInspector: React.FC = () => {
+  const [provider, setProvider] = useState<'melolo' | 'pinedrama'>('melolo');
+  const [selectedEndpoint, setSelectedEndpoint] = useState<string>('/melolo/foryou');
+  const [queryParams, setQueryParams] = useState<string>('offset=20&lang=id');
+  const [testMode, setTestMode] = useState<'backend' | 'browser'>('browser');
   const [isTesting, setIsTesting] = useState<boolean>(false);
   const [testResult, setTestResult] = useState<any | null>(null);
+
+  const meloloEndpoints = [
+    { label: 'ForYou / Rekomendasi', path: '/melolo/foryou', defaultParams: 'offset=20&lang=id' },
+    { label: 'Trending', path: '/melolo/trending', defaultParams: 'lang=id' },
+    { label: 'Latest / Terbaru', path: '/melolo/get-latest', defaultParams: 'lang=id' },
+    { label: 'Anime', path: '/melolo/anime', defaultParams: 'offset=20&lang=id' },
+    { label: 'Search Keyword', path: '/melolo/search', defaultParams: 'query=pewaris&limit=10&lang=id' },
+    { label: 'Detail Drama', path: '/melolo/detail', defaultParams: 'book_id=7583531888644459525&lang=id' },
+    { label: 'Get Episode Stream', path: '/melolo/get-episode', defaultParams: 'videoId=7583564321033030661' },
+  ];
+
+  const pinedramaEndpoints = [
+    { label: 'ForYou', path: '/pinedrama/foryou', defaultParams: 'cursor=1&lang=id' },
+    { label: 'Trending', path: '/pinedrama/trending', defaultParams: 'cursor=1&lang=id' },
+    { label: 'Search Keyword', path: '/pinedrama/search', defaultParams: 'query=CEO&lang=id' },
+    { label: 'Detail Drama', path: '/pinedrama/detail', defaultParams: 'collection_id=7690347898663539764&lang=id' },
+    { label: 'Get Episode Stream', path: '/pinedrama/get-episode', defaultParams: 'collection_id=7690347898663539764&episodeNumber=1&lang=id' },
+  ];
+
+  const currentEndpointList = provider === 'melolo' ? meloloEndpoints : pinedramaEndpoints;
+
+  const handleSelectEndpoint = (path: string) => {
+    setSelectedEndpoint(path);
+    const found = currentEndpointList.find((e) => e.path === path);
+    if (found) {
+      setQueryParams(found.defaultParams);
+    }
+  };
 
   const handleRunTest = async () => {
     setIsTesting(true);
     setTestResult(null);
 
-    // Parse query params string into object
     const paramsObj: Record<string, string> = {};
     if (queryParams.trim()) {
       queryParams.split('&').forEach((pair) => {
@@ -46,16 +62,13 @@ export const EndpointInspector: React.FC<EndpointInspectorProps> = () => {
         const data = await res.json();
         setTestResult(data);
       } else {
-        // Direct Browser Fetch Test
         const queryString = new URLSearchParams(paramsObj).toString();
         const fullUrl = `https://api.sansekai.my.id/api${selectedEndpoint}?${queryString}`;
         const startTime = Date.now();
 
         try {
           const directRes = await fetch(fullUrl, {
-            headers: {
-              Accept: 'application/json',
-            },
+            headers: { Accept: 'application/json' },
           });
           const elapsed = Date.now() - startTime;
           const json = await directRes.json();
@@ -68,7 +81,6 @@ export const EndpointInspector: React.FC<EndpointInspectorProps> = () => {
             data: json,
           });
         } catch (clientErr: any) {
-          // Fallback via lightweight proxy
           const proxyUrl = `/api/proxy?targetUrl=${encodeURIComponent(selectedEndpoint)}&${queryString}`;
           const proxyRes = await fetch(proxyUrl);
           const proxyJson = await proxyRes.json();
@@ -97,64 +109,37 @@ export const EndpointInspector: React.FC<EndpointInspectorProps> = () => {
         <div>
           <h2 className="text-lg font-bold text-white flex items-center gap-2">
             <Code className="w-5 h-5 text-amber-400" />
-            Endpoint Inspector &amp; Single Request Tester
+            Endpoint Inspector &amp; Single Request Tester (Melolo &amp; PineDrama)
           </h2>
           <p className="text-xs text-slate-400 mt-1">
-            Configure PineDrama endpoint routes and test 1 request to inspect raw JSON response before running full sync.
+            Test 1 request to inspect raw JSON output from Melolo and PineDrama endpoints before running sync.
           </p>
         </div>
 
-        {/* Mode Selector */}
+        {/* Provider Toggle */}
         <div className="flex items-center gap-1 bg-slate-950 p-1 rounded-xl border border-slate-800">
           <button
-            onClick={() => setTestMode('backend')}
+            onClick={() => {
+              setProvider('melolo');
+              handleSelectEndpoint('/melolo/foryou');
+            }}
             className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors cursor-pointer ${
-              testMode === 'backend' ? 'bg-amber-500 text-slate-950 shadow-sm' : 'text-slate-400 hover:text-white'
+              provider === 'melolo' ? 'bg-emerald-600 text-white shadow-sm' : 'text-slate-400 hover:text-white'
             }`}
           >
-            Backend Axios
+            🍈 Melolo
           </button>
           <button
-            onClick={() => setTestMode('browser')}
+            onClick={() => {
+              setProvider('pinedrama');
+              handleSelectEndpoint('/pinedrama/foryou');
+            }}
             className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors cursor-pointer ${
-              testMode === 'browser' ? 'bg-amber-500 text-slate-950 shadow-sm' : 'text-slate-400 hover:text-white'
+              provider === 'pinedrama' ? 'bg-indigo-600 text-white shadow-sm' : 'text-slate-400 hover:text-white'
             }`}
           >
-            Direct Browser Fetch
+            🌲 PineDrama
           </button>
-        </div>
-      </div>
-
-      {/* Editable Endpoints Form */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 text-xs">
-        <div>
-          <label className="block text-slate-400 font-semibold mb-1">ForYou Route</label>
-          <input
-            type="text"
-            value={endpoints.forYou}
-            onChange={(e) => setEndpoints({ ...endpoints, forYou: e.target.value })}
-            className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-slate-200 font-mono focus:outline-none focus:border-amber-500"
-          />
-        </div>
-
-        <div>
-          <label className="block text-slate-400 font-semibold mb-1">Trending Route</label>
-          <input
-            type="text"
-            value={endpoints.trending}
-            onChange={(e) => setEndpoints({ ...endpoints, trending: e.target.value })}
-            className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-slate-200 font-mono focus:outline-none focus:border-amber-500"
-          />
-        </div>
-
-        <div>
-          <label className="block text-slate-400 font-semibold mb-1">Get Episode Route</label>
-          <input
-            type="text"
-            value={endpoints.getEpisode}
-            onChange={(e) => setEndpoints({ ...endpoints, getEpisode: e.target.value })}
-            className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-slate-200 font-mono focus:outline-none focus:border-amber-500"
-          />
         </div>
       </div>
 
@@ -162,27 +147,29 @@ export const EndpointInspector: React.FC<EndpointInspectorProps> = () => {
       <div className="bg-slate-950 p-4 rounded-xl border border-slate-800 space-y-4">
         <div className="grid grid-cols-1 md:grid-cols-12 gap-3 items-end">
           <div className="md:col-span-5">
-            <label className="block text-xs text-slate-400 font-semibold mb-1">Endpoint to Test</label>
+            <label className="block text-xs text-slate-400 font-semibold mb-1">
+              Select {provider.toUpperCase()} Endpoint
+            </label>
             <select
               value={selectedEndpoint}
-              onChange={(e) => setSelectedEndpoint(e.target.value)}
+              onChange={(e) => handleSelectEndpoint(e.target.value)}
               className="w-full bg-slate-900 border border-slate-800 text-xs text-white rounded-xl px-3 py-2.5 font-mono focus:outline-none focus:border-amber-500 cursor-pointer"
             >
-              <option value={endpoints.forYou}>ForYou ({endpoints.forYou})</option>
-              <option value={endpoints.trending}>Trending ({endpoints.trending})</option>
-              <option value={endpoints.search}>Search ({endpoints.search})</option>
-              <option value={endpoints.detail}>Detail ({endpoints.detail})</option>
-              <option value={endpoints.getEpisode}>Get Episode ({endpoints.getEpisode})</option>
+              {currentEndpointList.map((ep) => (
+                <option key={ep.path} value={ep.path}>
+                  {ep.label} ({ep.path})
+                </option>
+              ))}
             </select>
           </div>
 
           <div className="md:col-span-5">
-            <label className="block text-xs text-slate-400 font-semibold mb-1">Query Parameters (URL encoded)</label>
+            <label className="block text-xs text-slate-400 font-semibold mb-1">Query Parameters</label>
             <input
               type="text"
               value={queryParams}
               onChange={(e) => setQueryParams(e.target.value)}
-              placeholder="e.g. cursor=1&lang=id or collection_id=7690347898663539764&episodeNumber=1"
+              placeholder="e.g. videoId=7583564321033030661 or book_id=..."
               className="w-full bg-slate-900 border border-slate-800 text-xs text-white rounded-xl px-3 py-2.5 font-mono focus:outline-none focus:border-amber-500"
             />
           </div>
@@ -199,7 +186,7 @@ export const EndpointInspector: React.FC<EndpointInspectorProps> = () => {
           </div>
         </div>
 
-        {/* Test Output Inspection Box */}
+        {/* Output Inspection Box */}
         {testResult && (
           <div className="space-y-2 pt-2 border-t border-slate-800/80">
             <div className="flex items-center justify-between text-xs">
@@ -209,7 +196,7 @@ export const EndpointInspector: React.FC<EndpointInspectorProps> = () => {
                 ) : (
                   <AlertCircle className="w-4 h-4 text-rose-400" />
                 )}
-                Response Output Status: <span className="font-mono text-amber-300">{testResult.status || 'N/A'}</span>
+                Status: <span className="font-mono text-amber-300">{testResult.status || '200 OK'}</span>
               </span>
               <span className="text-slate-500 font-mono text-[11px] truncate max-w-md">{testResult.fullUrl}</span>
             </div>

@@ -1,8 +1,9 @@
 import mongoose, { Schema, Document } from 'mongoose';
 
 export interface IDrama extends Document {
-  dramaId: string; // collection_id / bookId
-  collection_id: string; // alias
+  provider: 'pinedrama';
+  dramaId: string; // collection_id
+  collection_id: string;
   title: string;
   coverUrl: string;
   synopsis: string;
@@ -10,6 +11,7 @@ export interface IDrama extends Document {
   totalEpisodes: number;
   syncedEpisodesCount: number;
   pendingEpisodesCount: number;
+  views: number;
   syncStatus: 'PENDING_EPISODES' | 'PARTIAL' | 'COMPLETED' | 'FAILED';
   source?: string;
   isNewlyAdded?: boolean;
@@ -19,7 +21,8 @@ export interface IDrama extends Document {
 
 const DramaSchema = new Schema<IDrama>(
   {
-    dramaId: { type: String, required: true, unique: true, index: true },
+    provider: { type: String, default: 'pinedrama', index: true },
+    dramaId: { type: String, required: true, index: true, unique: true },
     collection_id: { type: String, index: true },
     title: { type: String, required: true, index: true },
     coverUrl: { type: String, default: '' },
@@ -28,12 +31,14 @@ const DramaSchema = new Schema<IDrama>(
     totalEpisodes: { type: Number, default: 0 },
     syncedEpisodesCount: { type: Number, default: 0 },
     pendingEpisodesCount: { type: Number, default: 0 },
+    views: { type: Number, default: 0 },
     syncStatus: {
       type: String,
       enum: ['PENDING_EPISODES', 'PARTIAL', 'COMPLETED', 'FAILED'],
       default: 'PENDING_EPISODES',
+      index: true,
     },
-    source: { type: String, default: 'PineDrama Catalog' },
+    source: { type: String, default: 'Catalog Explorer' },
     isNewlyAdded: { type: Boolean, default: true },
     importedAt: { type: Date, default: Date.now },
     lastSyncedAt: { type: Date },
@@ -45,3 +50,4 @@ const DramaSchema = new Schema<IDrama>(
 );
 
 export const Drama = mongoose.models.Drama || mongoose.model<IDrama>('Drama', DramaSchema);
+export const PineDramaDrama = Drama;

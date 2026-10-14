@@ -1,6 +1,7 @@
 import mongoose, { Schema, Document } from 'mongoose';
 
 export interface ICategory extends Document {
+  provider: 'pinedrama';
   categoryId: string;
   name: string;
   slug: string;
@@ -11,9 +12,10 @@ export interface ICategory extends Document {
 
 const CategorySchema = new Schema<ICategory>(
   {
-    categoryId: { type: String, required: true, unique: true, index: true },
+    provider: { type: String, default: 'pinedrama', index: true },
+    categoryId: { type: String, required: true, index: true, unique: true },
     name: { type: String, required: true },
-    slug: { type: String },
+    slug: { type: String, default: '' },
     totalTitles: { type: Number, default: 0 },
     syncStatus: {
       type: String,
@@ -29,3 +31,4 @@ const CategorySchema = new Schema<ICategory>(
 );
 
 export const Category = mongoose.models.Category || mongoose.model<ICategory>('Category', CategorySchema);
+export const PineDramaCategory = Category;
