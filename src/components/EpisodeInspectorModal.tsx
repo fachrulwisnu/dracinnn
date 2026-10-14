@@ -108,7 +108,7 @@ export const EpisodeInspectorModal: React.FC<EpisodeInspectorModalProps> = ({
   if (!drama) return null;
 
   const provider = (drama.provider || 'pinedrama') === 'melolo' ? 'melolo' : 'pinedrama';
-  const targetCollectionId = drama.book_id || drama.collection_id || drama.dramaId;
+  const targetCollectionId = drama.book_id || drama.collection_id || (drama as any).series_id_str || drama.dramaId || (drama as any)._id || (drama as any).id;
 
   // Refresh episodes from DB
   const refreshEpisodesFromDb = async () => {

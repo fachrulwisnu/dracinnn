@@ -73,7 +73,7 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
   if (!drama) return null;
 
   const provider = (drama.provider || 'pinedrama') === 'melolo' ? 'melolo' : 'pinedrama';
-  const targetCollectionId = drama.book_id || drama.collection_id || drama.dramaId;
+  const targetCollectionId = drama.book_id || drama.collection_id || (drama as any).series_id_str || drama.dramaId || (drama as any)._id || (drama as any).id;
 
   // Load stream for episode (Part 2 Fix)
   const loadEpisodeStream = async (epNum: number) => {
@@ -98,21 +98,34 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
 
     try {
       if (provider === 'melolo') {
-        // Melolo Pipeline Fix
-        setLoadingText(`On-Demand Syncing Melolo Ep ${epNum}...`);
+        // Melolo Pipeline 2-Step Fetch
+        setLoadingText(`Mengambil detail Melolo...`);
 
         let vid = ep?.video_id || ep?.vid || null;
 
         // Step 1: If video_id is missing, fetch detail to resolve vid
         if (!vid) {
-          setLoadingText(`Fetching Melolo detail to resolve vid for Ep ${epNum}...`);
-          const detailRes = await fetch(`https://api.sansekai.my.id/api/melolo/detail?book_id=${targetCollectionId}&lang=id`, {
-            headers: { Accept: '*/*' },
-            referrerPolicy: 'no-referrer',
-          });
+          setLoadingText(`Mengambil detail Melolo...`);
+          let detailJson: any = null;
+          const detailUrl = `https://api.sansekai.my.id/api/melolo/detail?book_id=${targetCollectionId}&lang=id`;
+          try {
+            const detailRes = await fetch(detailUrl, {
+              headers: { Accept: '*/*' },
+              referrerPolicy: 'no-referrer',
+            });
+            if (detailRes.ok) {
+              detailJson = await detailRes.json();
+            }
+          } catch (e) {}
 
-          if (detailRes.ok) {
-            const detailJson = await detailRes.json();
+          if (!detailJson || typeof detailJson !== 'object') {
+            try {
+              const proxyRes = await fetch(`/api/proxy-sansekai?url=${encodeURIComponent(detailUrl)}`);
+              if (proxyRes.ok) detailJson = await proxyRes.json();
+            } catch (e) {}
+          }
+
+          if (detailJson) {
             await fetch('/api/dramas/update-melolo-detail', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
@@ -121,11 +134,13 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
 
             // Re-fetch episode list
             const freshRes = await fetch(`/api/dramas/melolo/${targetCollectionId}/episodes`);
-            const freshData = await freshRes.json();
-            if (freshData.episodes) {
-              setEpisodes(freshData.episodes);
-              const matched = freshData.episodes.find((e: any) => e.episodeNumber === epNum);
-              vid = matched?.video_id || matched?.vid || null;
+            if (freshRes.ok) {
+              const freshData = await freshRes.json();
+              if (freshData.episodes) {
+                setEpisodes(freshData.episodes);
+                const matched = freshData.episodes.find((e: any) => e.episodeNumber === epNum);
+                vid = matched?.video_id || matched?.vid || null;
+              }
             }
           }
         }
@@ -135,19 +150,28 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
         }
 
         // Step 2: Fetch stream using videoId
-        setLoadingText(`Fetching direct Melolo stream for videoId: ${vid}...`);
-        const streamUrl = `https://api.sansekai.my.id/api/melolo/get-episode?videoId=${vid}`;
-        const streamRes = await fetch(streamUrl, {
-          headers: { Accept: '*/*' },
-          referrerPolicy: 'no-referrer',
-        });
+        setLoadingText(`Mendekripsi Stream Video Melolo...`);
+        let jsonPayload: any = null;
+        const streamEndpoint = `https://api.sansekai.my.id/api/melolo/get-episode?videoId=${vid}`;
+        try {
+          const streamRes = await fetch(streamEndpoint, {
+            headers: { Accept: '*/*' },
+            referrerPolicy: 'no-referrer',
+          });
 
-        if (!streamRes.ok) {
-          throw new Error(`HTTP ${streamRes.status} fetching Melolo stream.`);
+          if (streamRes.ok) {
+            jsonPayload = await streamRes.json();
+          }
+        } catch (e) {}
+
+        if (!jsonPayload || typeof jsonPayload !== 'object') {
+          try {
+            const proxyRes = await fetch(`/api/proxy-sansekai?url=${encodeURIComponent(streamEndpoint)}`);
+            if (proxyRes.ok) jsonPayload = await proxyRes.json();
+          } catch (e) {}
         }
 
-        const jsonPayload = await streamRes.json();
-        const best = jsonPayload.streamUrl || jsonPayload.qualities?.[0]?.streamUrl;
+        const best = jsonPayload?.streamUrl || jsonPayload?.qualities?.[0]?.streamUrl;
 
         if (!best) {
           throw new Error('Link stream URL tidak ditemukan dalam respons Melolo.');
@@ -160,9 +184,11 @@ export const VideoPlayerModal: React.FC<VideoPlayerModalProps> = ({
           body: JSON.stringify({
             provider: 'melolo',
             collection_id: targetCollectionId,
+            book_id: targetCollectionId,
             episodeNumber: epNum,
             video_id: vid,
             rawResponse: jsonPayload,
+            streamUrl: best,
           }),
         });
 

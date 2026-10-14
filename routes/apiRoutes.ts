@@ -1195,7 +1195,7 @@ router.post('/test-endpoint', async (req: Request, res: Response) => {
       return res.status(400).json({ success: false, error: 'Endpoint path required' });
     }
 
-    const testRes = await sansekaiApi.testEndpoint(endpointPath, params || {});
+    const testRes: any = await sansekaiApi.testEndpoint(endpointPath, params || {});
     res.json({
       success: true,
       status: testRes.status,

@@ -75,7 +75,7 @@ interface SyncControlCenterProps {
   onResumeWorker: () => void;
   onPauseWorker: () => void;
   onPrioritizeDrama: (dramaId: string) => void;
-  onSelectDrama: (dramaId: string) => void;
+  onSelectDrama: (dramaId: string, provider?: string) => void;
   onClearLogs: () => void;
   onSortChange: (sortKey: string) => void;
   onProviderFilterChange: (provider: string) => void;
@@ -536,7 +536,7 @@ export const SyncControlCenter: React.FC<SyncControlCenterProps> = ({
                       : 0;
 
                   const prov = drama.provider || 'pinedrama';
-                  const id = drama.book_id || drama.collection_id || drama.dramaId;
+                  const id = (drama as any).book_id || drama.collection_id || (drama as any).series_id_str || drama.dramaId || (drama as any)._id || (drama as any).id;
 
                   return (
                     <tr key={id} className="hover:bg-slate-800/40 transition-colors">
@@ -614,7 +614,7 @@ export const SyncControlCenter: React.FC<SyncControlCenterProps> = ({
 
                       <td className="py-3.5 px-4 text-right space-x-1.5 whitespace-nowrap">
                         <button
-                          onClick={() => onSelectDrama(id)}
+                          onClick={() => id && onSelectDrama(id, prov)}
                           className="px-2.5 py-1.5 rounded-lg bg-slate-800 text-slate-200 text-xs font-semibold hover:bg-slate-700 transition-colors cursor-pointer"
                         >
                           View Episodes

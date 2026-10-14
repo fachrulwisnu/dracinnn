@@ -132,11 +132,12 @@ export const PineDramaPortal: React.FC<PineDramaPortalProps> = ({
             {dramas.map((drama) => {
               const readyEps = drama.syncedEpisodesCount || 0;
               const pendingEps = drama.pendingEpisodesCount || 0;
+              const targetId = (drama as any).book_id || (drama as any).collection_id || (drama as any).series_id_str || drama.dramaId || (drama as any)._id || (drama as any).id;
 
               return (
                 <div
-                  key={drama.dramaId}
-                  onClick={() => onSelectDrama(drama.dramaId)}
+                  key={targetId || drama.title}
+                  onClick={() => targetId && onSelectDrama(targetId)}
                   className="group relative bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden shadow-lg hover:border-amber-500/50 hover:shadow-2xl hover:shadow-amber-500/10 transition-all duration-300 flex flex-col cursor-pointer"
                 >
                   {/* Poster Image (Aspect Ratio 3:4) */}

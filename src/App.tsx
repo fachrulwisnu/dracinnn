@@ -178,9 +178,11 @@ export default function App() {
   };
 
   // Open Episode Inspector Modal for a Drama
-  const handleSelectDrama = async (dramaId: string) => {
+  const handleSelectDrama = async (dramaId: string, provider?: string) => {
+    if (!dramaId) return;
     try {
-      const res = await fetch(`/api/dramas/${dramaId}`);
+      const url = provider ? `/api/dramas/${dramaId}?provider=${provider}` : `/api/dramas/${dramaId}`;
+      const res = await fetch(url);
       if (res.ok) {
         const data = await res.json();
         if (data.success) {
