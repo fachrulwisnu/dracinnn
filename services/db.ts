@@ -8,33 +8,50 @@ import { MeloloCategory } from '../models/MeloloCategory.js';
 
 const MONGODB_URI =
   process.env.MONGODB_URI ||
-  'mongodb+srv://fachrulwisnunovianto_db_user:%40BosskuBabi20@cluster0.4sfcd75.mongodb.net/dracin_db?retryWrites=true&w=majority&appName=Cluster0';
+  'mongodb://fachrulwisnunovianto_db_user:%40BosskuBabi20@ac-jjfqkcv-shard-00-00.4sfcd75.mongodb.net:27017,ac-jjfqkcv-shard-00-01.4sfcd75.mongodb.net:27017,ac-jjfqkcv-shard-00-02.4sfcd75.mongodb.net:27017/?ssl=true&replicaSet=atlas-3mdncx-shard-0&authSource=admin';
 
 let isConnected = false;
+let connectionPromise: Promise<typeof mongoose> | null = null;
+let hasMigrated = false;
 
 export async function connectDB(): Promise<typeof mongoose> {
-  if (isConnected && mongoose.connection.readyState === 1) {
+  if (mongoose.connection.readyState === 1) {
+    isConnected = true;
     return mongoose;
   }
 
-  try {
-    mongoose.set('strictQuery', false);
-    const conn = await mongoose.connect(MONGODB_URI, {
-      dbName: 'dracin_db',
-    });
-    isConnected = true;
-    console.log(`[MongoDB] Connected successfully to host: ${conn.connection.host}, database: dracin_db`);
-
-    // Run automatic startup migration & contamination cleanup
-    await runMigrationAndCleanup().catch((err) => {
-      console.error('[MongoDB Migration] Error during automatic cleanup:', err);
-    });
-
-    return conn;
-  } catch (error) {
-    console.error('[MongoDB] Connection error:', error);
-    throw error;
+  if (connectionPromise) {
+    return connectionPromise;
   }
+
+  connectionPromise = (async () => {
+    try {
+      mongoose.set('strictQuery', false);
+      const conn = await mongoose.connect(MONGODB_URI, {
+        dbName: 'dracin_db',
+        serverSelectionTimeoutMS: 15000,
+      });
+      isConnected = true;
+      console.log(`[MongoDB] Berhasil terhubung ke Atlas (Host: ${conn.connection.host}, database: dracin_db)`);
+
+      // Jalankan migrasi HANYA SETELAH koneksi Mongoose benar-benar berstatus connected (readyState === 1)
+      if (!hasMigrated && mongoose.connection.readyState === 1) {
+        hasMigrated = true;
+        runMigrationAndCleanup().catch((err) => {
+          console.error('[MongoDB Migration] Gagal saat startup cleanup:', err.message);
+        });
+      }
+
+      return conn;
+    } catch (error: any) {
+      connectionPromise = null;
+      isConnected = false;
+      console.error('[MongoDB] Gagal terhubung:', error.message);
+      throw error;
+    }
+  })();
+
+  return connectionPromise;
 }
 
 /**
@@ -49,6 +66,12 @@ export async function runMigrationAndCleanup(): Promise<{
   let migratedDramas = 0;
   let migratedEpisodes = 0;
   let migratedCategories = 0;
+
+  // Pastikan koneksi Mongoose sudah benar-benar readyState === 1 (connected)
+  if (mongoose.connection.readyState !== 1) {
+    console.warn('[MongoDB Migration] Dibatalkan: Mongoose belum berstatus connected.');
+    return { migratedDramas: 0, migratedEpisodes: 0, migratedCategories: 0 };
+  }
 
   try {
     // 1. Find contaminated Melolo dramas in pinedrama_dramas

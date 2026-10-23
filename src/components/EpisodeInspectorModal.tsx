@@ -21,6 +21,7 @@ import {
   Flame,
 } from 'lucide-react';
 import { resolveCoverUrl, handleImageError } from '../utils/imageUtils';
+import { useTerminal } from '../context/TerminalContext';
 
 interface EpisodeItem {
   episodeNumber: number;
@@ -31,10 +32,13 @@ interface EpisodeItem {
   episodeCover?: string;
   streamUrl?: string | null;
   bestUrl?: string | null;
+  gdriveFileId?: string | null;
+  gdriveViewLink?: string | null;
+  gdriveDirectLink?: string | null;
   quality?: string | null;
   qualities?: any[];
   backupUrls?: string[];
-  syncStatus: 'PENDING' | 'SYNCED' | 'FAILED' | string;
+  syncStatus: 'PENDING' | 'SYNCED' | 'FAILED' | 'BACKED_UP_GDRIVE' | string;
   errorMessage?: string | null;
   lastSyncedAt?: string;
 }
@@ -67,6 +71,7 @@ export const EpisodeInspectorModal: React.FC<EpisodeInspectorModalProps> = ({
   onClose,
   onRefreshData,
 }) => {
+  const { addLog } = useTerminal();
   const [episodes, setEpisodes] = useState<EpisodeItem[]>(initialEpisodes || []);
   const [activeTab, setActiveTab] = useState<'table' | 'player'>('table');
 
@@ -276,7 +281,7 @@ export const EpisodeInspectorModal: React.FC<EpisodeInspectorModalProps> = ({
     setIsMassSyncing(false);
   };
 
-  // Play Episode On-Demand (Part 2 Fix)
+  // Play Episode On-Demand with GDrive Priority
   const handlePlayEpisode = async (epNum: number) => {
     setPlayingEpNum(epNum);
     setActiveTab('player');
@@ -284,16 +289,53 @@ export const EpisodeInspectorModal: React.FC<EpisodeInspectorModalProps> = ({
 
     const ep = episodes.find((e) => e.episodeNumber === epNum);
 
-    // If already synced, play immediately!
-    if (ep && ep.syncStatus === 'SYNCED' && (ep.bestUrl || ep.streamUrl)) {
-      const best = ep.bestUrl || ep.streamUrl || '';
-      setActiveStreamUrl(best);
-      setActiveQuality(ep.quality || '720p');
+    // 1. Prioritize Google Drive Direct Link if available (anti-expired!)
+    if (ep && ep.gdriveDirectLink) {
+      setActiveStreamUrl(ep.gdriveDirectLink);
+      setActiveQuality('☁️ Google Drive Direct');
       setActiveVideoId(ep.video_id || ep.vid || null);
       return;
     }
 
-    // On-Demand fetch required!
+    // 2. If already synced CDN stream exists, play CDN stream AND auto-trigger background GDrive backup
+    if (ep && (ep.syncStatus === 'SYNCED' || ep.syncStatus === 'BACKED_UP_GDRIVE') && (ep.bestUrl || ep.streamUrl)) {
+      const cdnUrl = ep.bestUrl || ep.streamUrl || '';
+      setActiveStreamUrl(cdnUrl);
+      setActiveQuality(ep.quality || '720p CDN');
+      setActiveVideoId(ep.video_id || ep.vid || null);
+
+      // Auto-trigger background GDrive backup if not backed up yet
+      if (!ep.gdriveFileId) {
+        addLog('info', `[Auto GDrive] Menjalankan background backup untuk "${drama.title}" Ep ${epNum}...`);
+        fetch('/api/drive/auto-backup', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            dramaId: targetCollectionId,
+            provider,
+            episodeNumber: epNum,
+            streamUrl: cdnUrl,
+            dramaTitle: drama.title,
+          }),
+        })
+          .then((r) => r.json())
+          .then((data) => {
+            if (data.success) {
+              addLog('success', `[Auto GDrive] Berhasil backup "${drama.title}" Ep ${epNum} ke Google Drive! File ID: ${data.data?.fileId || 'OK'}`);
+              refreshEpisodesFromDb();
+            } else {
+              addLog('error', `[Auto GDrive] Gagal backup "${drama.title}" Ep ${epNum}: ${data.error}`, data.details);
+            }
+          })
+          .catch((err) => {
+            console.warn('[Auto GDrive Backup error]:', err);
+            addLog('error', `[Auto GDrive] Network error: ${err.message}`, err.stack);
+          });
+      }
+      return;
+    }
+
+    // On-Demand fetch required from Sansekai
     setIsLoadingPlayer(true);
 
     try {
@@ -368,6 +410,24 @@ export const EpisodeInspectorModal: React.FC<EpisodeInspectorModalProps> = ({
         setActiveVideoId(vid);
         refreshEpisodesFromDb();
         onRefreshData();
+
+        // Trigger background GDrive backup
+        fetch('/api/drive/auto-backup', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            dramaId: targetCollectionId,
+            provider: 'melolo',
+            episodeNumber: epNum,
+            streamUrl: best,
+            dramaTitle: drama.title,
+          }),
+        })
+          .then((r) => r.json())
+          .then((data) => {
+            if (data.success) refreshEpisodesFromDb();
+          })
+          .catch((err) => console.warn('[Auto GDrive Backup error]:', err));
       } else {
         // PineDrama Pipeline
         setPlayerLoadingText(`On-Demand Syncing PineDrama Ep ${epNum}...`);
@@ -405,6 +465,24 @@ export const EpisodeInspectorModal: React.FC<EpisodeInspectorModalProps> = ({
         setActiveVideoId(vid);
         refreshEpisodesFromDb();
         onRefreshData();
+
+        // Trigger background GDrive backup
+        fetch('/api/drive/auto-backup', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            dramaId: targetCollectionId,
+            provider: 'pinedrama',
+            episodeNumber: epNum,
+            streamUrl: best,
+            dramaTitle: drama.title,
+          }),
+        })
+          .then((r) => r.json())
+          .then((data) => {
+            if (data.success) refreshEpisodesFromDb();
+          })
+          .catch((err) => console.warn('[Auto GDrive Backup error]:', err));
       }
     } catch (err: any) {
       setPlayerError(err.message || 'Gagal memutar video episode.');

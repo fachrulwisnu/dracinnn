@@ -19,7 +19,10 @@ export interface IMeloloEpisode extends Document {
   streamUrl: string | null; // highest quality 720p streamUrl
   qualities: IMeloloQuality[];
   backupUrls: string[];
-  syncStatus: 'PENDING' | 'SYNCED' | 'FAILED';
+  syncStatus: 'PENDING' | 'SYNCED' | 'FAILED' | 'BACKED_UP_GDRIVE';
+  gdriveFileId?: string | null;
+  gdriveViewLink?: string | null;
+  gdriveDirectLink?: string | null;
   errorMessage?: string | null;
   lastSyncedAt?: Date;
 }
@@ -46,10 +49,12 @@ const MeloloEpisodeSchema = new Schema<IMeloloEpisode>(
     backupUrls: { type: [String], default: [] },
     syncStatus: {
       type: String,
-      enum: ['PENDING', 'SYNCED', 'FAILED'],
       default: 'PENDING',
       index: true,
     },
+    gdriveFileId: { type: String, default: null },
+    gdriveViewLink: { type: String, default: null },
+    gdriveDirectLink: { type: String, default: null },
     errorMessage: { type: String, default: null },
     lastSyncedAt: { type: Date },
   },

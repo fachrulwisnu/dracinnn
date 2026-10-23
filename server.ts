@@ -1,16 +1,25 @@
-import express from 'express';
 import dotenv from 'dotenv';
+dotenv.config();
+
+import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import apiRouter from './routes/apiRoutes.js';
 import { connectDB } from './services/db.js';
 
-dotenv.config();
-
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
+
+// Initialize MongoDB connection on server startup
+connectDB()
+  .then(() => {
+    console.log('[Server Startup] MongoDB readyState connected.');
+  })
+  .catch((err) => {
+    console.error('[Server Startup] MongoDB initial connection error:', err.message);
+  });
 
 // Body parser with 50mb limit to prevent 413 Payload Too Large error
 app.use(express.json({ limit: '50mb' }));

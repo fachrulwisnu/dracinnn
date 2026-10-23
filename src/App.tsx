@@ -4,9 +4,14 @@ import { SyncControlCenter } from './components/SyncControlCenter';
 import { DracinPortal } from './components/DracinPortal';
 import { AutoEpisodeFetcher } from './components/AutoEpisodeFetcher';
 import { EpisodeInspectorModal } from './components/EpisodeInspectorModal';
+import { GDriveSyncManager } from './components/GDriveSyncManager';
+import { TerminalLogger } from './components/TerminalLogger';
+import { useTerminal } from './context/TerminalContext';
+import { ErrorBoundary } from './components/ErrorBoundary';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'portal' | 'fetcher' | 'sync'>('portal');
+  const { addLog } = useTerminal();
+  const [activeTab, setActiveTab] = useState<'portal' | 'fetcher' | 'sync' | 'drive'>('portal');
   const [categories, setCategories] = useState<any[]>([]);
   const [dramas, setDramas] = useState<any[]>([]);
   const [selectedProvider, setSelectedProvider] = useState<string>('all');
@@ -119,11 +124,19 @@ export default function App() {
   // Handlers for Control Center Actions
   const handleTriggerCategories = async () => {
     setLoadingAction('categories');
+    addLog('info', 'Memulai sinkronisasi kategori & katalog dari Sansekai API...');
     try {
-      await fetch('/api/sync/categories', { method: 'POST' });
+      const res = await fetch('/api/sync/categories', { method: 'POST' });
+      const data = await res.json();
+      if (data.success) {
+        addLog('success', 'Sinkronisasi kategori berhasil dijalankan!');
+      } else {
+        addLog('error', `Gagal sinkronisasi kategori: ${data.error}`, data.details);
+      }
       await fetchSyncStatus();
-    } catch (err) {
+    } catch (err: any) {
       console.error(err);
+      addLog('error', `Exception sinkronisasi kategori: ${err.message}`, err.stack);
     } finally {
       setLoadingAction(null);
     }
@@ -131,11 +144,19 @@ export default function App() {
 
   const handleResumeWorker = async () => {
     setLoadingAction('resume');
+    addLog('info', 'Melanjutkan background worker rate-limited sync...');
     try {
-      await fetch('/api/sync/episodes/resume', { method: 'POST' });
+      const res = await fetch('/api/sync/episodes/resume', { method: 'POST' });
+      const data = await res.json();
+      if (data.success) {
+        addLog('success', 'Background worker berhasil dilanjutkan (RESUMED)!');
+      } else {
+        addLog('error', `Gagal melanjutkan worker: ${data.error}`);
+      }
       await fetchSyncStatus();
-    } catch (err) {
+    } catch (err: any) {
       console.error(err);
+      addLog('error', `Exception resume worker: ${err.message}`, err.stack);
     } finally {
       setLoadingAction(null);
     }
@@ -143,31 +164,47 @@ export default function App() {
 
   const handlePauseWorker = async () => {
     setLoadingAction('pause');
+    addLog('warn', 'Menjeda background worker sinkronisasi...');
     try {
-      await fetch('/api/sync/pause', { method: 'POST' });
+      const res = await fetch('/api/sync/pause', { method: 'POST' });
+      const data = await res.json();
+      if (data.success) {
+        addLog('warn', 'Background worker berhasil dijeda (PAUSED).');
+      }
       await fetchSyncStatus();
-    } catch (err) {
+    } catch (err: any) {
       console.error(err);
+      addLog('error', `Exception pause worker: ${err.message}`, err.stack);
     } finally {
       setLoadingAction(null);
     }
   };
 
   const handlePrioritizeDrama = async (dramaId: string) => {
+    addLog('info', `Memprioritaskan antrean sinkronisasi untuk drama ID: ${dramaId}...`);
     try {
-      await fetch(`/api/sync/drama/${dramaId}`, { method: 'POST' });
+      const res = await fetch(`/api/sync/drama/${dramaId}`, { method: 'POST' });
+      const data = await res.json();
+      if (data.success) {
+        addLog('success', `Drama ${dramaId} berhasil diprioritaskan di antrean!`);
+      } else {
+        addLog('error', `Gagal memprioritaskan drama: ${data.error}`, data.details);
+      }
       await fetchSyncStatus();
-    } catch (err) {
+    } catch (err: any) {
       console.error(err);
+      addLog('error', `Exception prioritize drama: ${err.message}`, err.stack);
     }
   };
 
   const handleClearLogs = async () => {
     try {
       await fetch('/api/sync/logs', { method: 'DELETE' });
+      addLog('info', 'Log sinkronisasi backend MongoDB berhasil dibersihkan.');
       await fetchSyncStatus();
-    } catch (err) {
+    } catch (err: any) {
       console.error(err);
+      addLog('error', `Gagal membersihkan log: ${err.message}`, err.stack);
     }
   };
 
@@ -206,44 +243,48 @@ export default function App() {
         onRefresh={handleRefreshAllData}
       />
 
-      <main className="pb-12">
-        {activeTab === 'portal' && (
-          <DracinPortal
-            categories={categories}
-            dramas={dramas}
-            selectedProvider={selectedProvider}
-            onSelectProvider={setSelectedProvider}
-            selectedCategory={selectedCategory}
-            onSelectCategory={setSelectedCategory}
-            searchQuery={searchQuery}
-            onSearchChange={setSearchQuery}
-            onSelectDrama={handleSelectDrama}
-          />
-        )}
+      <main className="pb-36">
+        <ErrorBoundary>
+          {activeTab === 'portal' && (
+            <DracinPortal
+              categories={categories}
+              dramas={dramas}
+              selectedProvider={selectedProvider}
+              onSelectProvider={setSelectedProvider}
+              selectedCategory={selectedCategory}
+              onSelectCategory={setSelectedCategory}
+              searchQuery={searchQuery}
+              onSearchChange={setSearchQuery}
+              onSelectDrama={handleSelectDrama}
+            />
+          )}
 
-        {activeTab === 'fetcher' && (
-          <AutoEpisodeFetcher onRefreshData={handleRefreshAllData} />
-        )}
+          {activeTab === 'fetcher' && (
+            <AutoEpisodeFetcher onRefreshData={handleRefreshAllData} />
+          )}
 
-        {activeTab === 'sync' && (
-          <SyncControlCenter
-            workerState={workerState}
-            counters={counters}
-            dramas={dramas}
-            categories={categories}
-            onTriggerCategories={handleTriggerCategories}
-            onResumeWorker={handleResumeWorker}
-            onPauseWorker={handlePauseWorker}
-            onPrioritizeDrama={handlePrioritizeDrama}
-            onSelectDrama={handleSelectDrama}
-            onClearLogs={handleClearLogs}
-            onSortChange={setSortOption}
-            onProviderFilterChange={setTableProviderFilter}
-            selectedTableProvider={tableProviderFilter}
-            onRefreshAllData={handleRefreshAllData}
-            loadingAction={loadingAction}
-          />
-        )}
+          {activeTab === 'sync' && (
+            <SyncControlCenter
+              workerState={workerState}
+              counters={counters}
+              dramas={dramas}
+              categories={categories}
+              onTriggerCategories={handleTriggerCategories}
+              onResumeWorker={handleResumeWorker}
+              onPauseWorker={handlePauseWorker}
+              onPrioritizeDrama={handlePrioritizeDrama}
+              onSelectDrama={handleSelectDrama}
+              onClearLogs={handleClearLogs}
+              onSortChange={setSortOption}
+              onProviderFilterChange={setTableProviderFilter}
+              selectedTableProvider={tableProviderFilter}
+              onRefreshAllData={handleRefreshAllData}
+              loadingAction={loadingAction}
+            />
+          )}
+
+          {activeTab === 'drive' && <GDriveSyncManager />}
+        </ErrorBoundary>
       </main>
 
       {/* 🎬 Episode Inspector & Granular Sync Control Modal */}
@@ -255,6 +296,9 @@ export default function App() {
           onRefreshData={handleRefreshAllData}
         />
       )}
+
+      {/* 🖥️ Live Web Terminal Log Floating Window */}
+      <TerminalLogger />
     </div>
   );
 }

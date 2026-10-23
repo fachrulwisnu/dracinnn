@@ -13,6 +13,7 @@ import { syncWorker } from '../services/rateLimitedSyncWorker.js';
 import { sansekaiApi } from '../services/sansekaiPinedramaApi.js';
 import { getCategoryModel, getDramaModel, getEpisodeModel } from '../services/modelResolver.js';
 import { normalizeDramaItem, normalizeMeloloDetail, normalizeEpisodeResponse } from '../services/providerAdapter.js';
+import { getDramaFolder, uploadVideoFromUrl } from '../services/gdriveService.js';
 
 const router = Router();
 
@@ -1227,4 +1228,302 @@ router.delete('/sync/logs', async (_req: Request, res: Response) => {
   }
 });
 
+/**
+ * POST /api/drive/auto-backup
+ * Background uploader to pipe video stream directly to Google Drive
+ */
+router.post('/drive/auto-backup', async (req: Request, res: Response) => {
+  try {
+    const { dramaId, provider = 'pinedrama', episodeNumber, streamUrl, dramaTitle, force = false, forceResync = false } = req.body;
+    const isForce = Boolean(force || forceResync);
+
+    if (!dramaId || !episodeNumber || !streamUrl) {
+      return res.status(400).json({
+        success: false,
+        error: 'dramaId, episodeNumber, and streamUrl are required',
+      });
+    }
+
+    const targetProvider = provider === 'melolo' ? 'melolo' : 'pinedrama';
+    let title = dramaTitle;
+
+    if (!title) {
+      const DramaModel = getDramaModel(targetProvider);
+      const dramaDoc = await DramaModel.findOne({
+        $or: [{ dramaId }, { collection_id: dramaId }, { book_id: dramaId }],
+      }).lean();
+      title = dramaDoc?.title || dramaDoc?.book_name || `Drama_${dramaId}`;
+    }
+
+    // Ensure folder hierarchy in Google Drive
+    const folderId = await getDramaFolder(targetProvider, title);
+
+    const fileName = `${targetProvider}_${dramaId}_ep${episodeNumber}.mp4`;
+    const uploadRes = await uploadVideoFromUrl(streamUrl, fileName, folderId, isForce);
+
+    // Update episode in MongoDB
+    const EpisodeModel = getEpisodeModel(targetProvider);
+    const epFilter = targetProvider === 'melolo'
+      ? { $or: [{ book_id: dramaId }, { collection_id: dramaId }, { dramaId }], episodeNumber: Number(episodeNumber) }
+      : { $or: [{ collection_id: dramaId }, { dramaId }], episodeNumber: Number(episodeNumber) };
+
+    const updatePayload: any = {
+      gdriveFileId: uploadRes.fileId,
+      gdriveViewLink: uploadRes.webViewLink,
+      gdriveDirectLink: uploadRes.gdriveDirectLink,
+      syncStatus: 'BACKED_UP_GDRIVE',
+      lastSyncedAt: new Date(),
+    };
+
+    const updatedEp = await EpisodeModel.findOneAndUpdate(
+      epFilter,
+      { $set: updatePayload },
+      { new: true, upsert: true, strict: false }
+    );
+
+    res.json({
+      success: true,
+      message: `Episode ${episodeNumber} auto-backed up to Google Drive.`,
+      data: {
+        fileId: uploadRes.fileId,
+        webViewLink: uploadRes.webViewLink,
+        gdriveDirectLink: uploadRes.gdriveDirectLink,
+        episode: updatedEp,
+      },
+    });
+  } catch (err: any) {
+    console.error('[Drive Auto-Backup Error]:', err);
+    const errorDescription =
+      err.response?.data?.error_description ||
+      (typeof err.response?.data?.error === 'string'
+        ? err.response?.data?.error
+        : err.response?.data?.error?.message) ||
+      err.message;
+    const fullErrorStack = err.stack || (err.response?.data ? JSON.stringify(err.response.data, null, 2) : '');
+
+    res.status(500).json({
+      success: false,
+      error: errorDescription,
+      details: fullErrorStack,
+    });
+  }
+});
+
+/**
+ * GET /api/drive/episodes
+ * Fetch episodes with GDrive backup status, mock detection, search, and priority sorting
+ */
+router.get('/drive/episodes', async (req: Request, res: Response) => {
+  try {
+    const { provider = 'all', status = 'all', q = '', limit: customLimit } = req.query;
+    const maxItems = Math.min(Number(customLimit) || 500, 1000);
+    const searchQuery = typeof q === 'string' ? q.trim().toLowerCase() : '';
+
+    let items: any[] = [];
+
+    const fetchForProvider = async (prov: 'pinedrama' | 'melolo') => {
+      const EpisodeModel = getEpisodeModel(prov);
+      const DramaModel = getDramaModel(prov);
+
+      let query: any = {};
+
+      if (status === 'backed_up') {
+        // Backed up properly (not null, not mock)
+        query.gdriveFileId = { $exists: true, $ne: null, $not: /mock/i };
+      } else if (status === 'mock') {
+        // Explicitly mock data that needs force resync
+        query.gdriveFileId = { $regex: 'mock', $options: 'i' };
+      } else if (status === 'missing') {
+        // Missing or mock
+        query.$or = [
+          { gdriveFileId: null },
+          { gdriveFileId: { $exists: false } },
+          { gdriveFileId: '' },
+          { gdriveFileId: { $regex: 'mock', $options: 'i' } },
+        ];
+        query.streamUrl = { $ne: null };
+      } else {
+        // 'all': any episode with a stream URL or synced status
+        query.$or = [
+          { syncStatus: 'SYNCED' },
+          { syncStatus: 'BACKED_UP_GDRIVE' },
+          { streamUrl: { $ne: null } },
+        ];
+      }
+
+      const eps = await EpisodeModel.find(query).sort({ updatedAt: -1 }).limit(maxItems).lean();
+      const dramaIds = Array.from(new Set(eps.map((e: any) => e.dramaId || e.collection_id || e.book_id)));
+      const dramas = await DramaModel.find({
+        $or: [
+          { dramaId: { $in: dramaIds } },
+          { collection_id: { $in: dramaIds } },
+          { book_id: { $in: dramaIds } },
+        ],
+      }).lean();
+
+      const dramaMap = new Map<string, any>();
+      dramas.forEach((d: any) => {
+        const idKey = d.dramaId || d.collection_id || d.book_id;
+        if (idKey) dramaMap.set(idKey, d);
+      });
+
+      return eps.map((ep: any) => {
+        const idKey = ep.dramaId || ep.collection_id || ep.book_id;
+        const parentDrama = dramaMap.get(idKey);
+        const title = parentDrama?.title || parentDrama?.book_name || `Drama ${idKey}`;
+        const isMock = Boolean(ep.gdriveFileId && String(ep.gdriveFileId).toLowerCase().includes('mock'));
+
+        return {
+          ...ep,
+          provider: prov,
+          dramaTitle: title,
+          dramaCover: parentDrama?.coverUrl || parentDrama?.cover || parentDrama?.book_cover || '',
+          isMock,
+        };
+      });
+    };
+
+    if (provider === 'all' || provider === 'pinedrama') {
+      const pineEps = await fetchForProvider('pinedrama');
+      items = items.concat(pineEps);
+    }
+    if (provider === 'all' || provider === 'melolo') {
+      const meloloEps = await fetchForProvider('melolo');
+      items = items.concat(meloloEps);
+    }
+
+    // Optional text filter
+    if (searchQuery) {
+      items = items.filter((item) =>
+        item.dramaTitle.toLowerCase().includes(searchQuery) ||
+        String(item.dramaId || item.collection_id || '').toLowerCase().includes(searchQuery)
+      );
+    }
+
+    // Priority Sorting:
+    // 1. Mock Data first (Priority 0)
+    // 2. Missing GDrive backup second (Priority 1)
+    // 3. Backed up properly third (Priority 2)
+    items.sort((a, b) => {
+      const getPriority = (item: any) => {
+        if (item.isMock || (item.gdriveFileId && String(item.gdriveFileId).toLowerCase().includes('mock'))) return 0;
+        if (!item.gdriveFileId) return 1;
+        return 2;
+      };
+
+      const prioA = getPriority(a);
+      const prioB = getPriority(b);
+      if (prioA !== prioB) return prioA - prioB;
+
+      // Secondary: dramaTitle alphabetical, then episodeNumber asc
+      const titleCompare = (a.dramaTitle || '').localeCompare(b.dramaTitle || '');
+      if (titleCompare !== 0) return titleCompare;
+      return (a.episodeNumber || 0) - (b.episodeNumber || 0);
+    });
+
+    res.json({
+      success: true,
+      count: items.length,
+      mockCount: items.filter((i) => i.isMock).length,
+      missingCount: items.filter((i) => !i.gdriveFileId || i.isMock).length,
+      items: items.slice(0, maxItems),
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+/**
+ * POST /api/drive/backup-all-missing
+ * Bulk backup missing episodes to Google Drive
+ */
+router.post('/drive/backup-all-missing', async (req: Request, res: Response) => {
+  try {
+    const { provider = 'all' } = req.body;
+
+    const getMissing = async (prov: 'pinedrama' | 'melolo') => {
+      const EpisodeModel = getEpisodeModel(prov);
+      return EpisodeModel.find({
+        streamUrl: { $ne: null },
+        $or: [{ gdriveFileId: null }, { gdriveFileId: { $exists: false } }],
+      }).lean();
+    };
+
+    let missingEps: any[] = [];
+    if (provider === 'all' || provider === 'pinedrama') {
+      const pineList = await getMissing('pinedrama');
+      missingEps = missingEps.concat(pineList.map((e) => ({ ...e, provider: 'pinedrama' })));
+    }
+    if (provider === 'all' || provider === 'melolo') {
+      const meloloList = await getMissing('melolo');
+      missingEps = missingEps.concat(meloloList.map((e) => ({ ...e, provider: 'melolo' })));
+    }
+
+    if (missingEps.length === 0) {
+      return res.json({ success: true, message: 'All synced episodes are already backed up to Google Drive!' });
+    }
+
+    // Process background backups
+    (async () => {
+      for (const ep of missingEps) {
+        try {
+          const prov = ep.provider;
+          const dId = ep.dramaId || ep.collection_id || ep.book_id;
+          const DramaModel = getDramaModel(prov);
+          const dramaDoc = await DramaModel.findOne({
+            $or: [{ dramaId: dId }, { collection_id: dId }, { book_id: dId }],
+          }).lean();
+
+          const title = dramaDoc?.title || dramaDoc?.book_name || `Drama_${dId}`;
+          const folderId = await getDramaFolder(prov, title);
+          const fileName = `${prov}_${dId}_ep${ep.episodeNumber}.mp4`;
+
+          const uploadRes = await uploadVideoFromUrl(ep.streamUrl, fileName, folderId);
+
+          const EpisodeModel = getEpisodeModel(prov);
+          const epFilter = prov === 'melolo'
+            ? { $or: [{ book_id: dId }, { collection_id: dId }, { dramaId: dId }], episodeNumber: ep.episodeNumber }
+            : { $or: [{ collection_id: dId }, { dramaId: dId }], episodeNumber: ep.episodeNumber };
+
+          await EpisodeModel.findOneAndUpdate(
+            epFilter,
+            {
+              $set: {
+                gdriveFileId: uploadRes.fileId,
+                gdriveViewLink: uploadRes.webViewLink,
+                gdriveDirectLink: uploadRes.gdriveDirectLink,
+                syncStatus: 'BACKED_UP_GDRIVE',
+                lastSyncedAt: new Date(),
+              },
+            },
+            { strict: false }
+          );
+        } catch (err) {
+          console.error(`[Bulk GDrive Backup] Error processing ep ${ep.episodeNumber}:`, err);
+        }
+      }
+    })();
+
+    res.json({
+      success: true,
+      message: `Started background backup for ${missingEps.length} missing episode(s).`,
+      missingCount: missingEps.length,
+    });
+  } catch (err: any) {
+    console.error('[Bulk GDrive Backup Endpoint Error]:', err);
+    const errorDescription =
+      err.response?.data?.error_description ||
+      (typeof err.response?.data?.error === 'string'
+        ? err.response?.data?.error
+        : err.response?.data?.error?.message) ||
+      err.message;
+    res.status(500).json({
+      success: false,
+      error: errorDescription,
+      details: err.stack || (err.response?.data ? JSON.stringify(err.response.data, null, 2) : ''),
+    });
+  }
+});
+
 export default router;
+

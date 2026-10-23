@@ -1,6 +1,8 @@
 {
-  "name": "PineDrama Sync & Stream",
-  "description": "Chinese Short Drama Streaming & Automated Background Scraper/Sync Web Application powered by Sansekai PineDrama API",
+  "name": "Remix PineDrama Sync \u0026 Stream",
+  "description": "Chinese Short Drama Streaming \u0026 Automated Background Scraper/Sync Web Application powered by Sansekai PineDrama API",
   "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }

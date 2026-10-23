@@ -18,11 +18,14 @@ import {
 } from 'lucide-react';
 import { resolveCoverUrl, handleImageError } from '../utils/imageUtils';
 
+import { useTerminal } from '../context/TerminalContext';
+
 interface AutoEpisodeFetcherProps {
   onRefreshData: () => void;
 }
 
 export const AutoEpisodeFetcher: React.FC<AutoEpisodeFetcherProps> = ({ onRefreshData }) => {
+  const { addLog: addTerminalLog } = useTerminal();
   // Queue Selector: 'melolo' | 'pinedrama' | 'alternating'
   const [queueSource, setQueueSource] = useState<'melolo' | 'pinedrama' | 'alternating'>('melolo');
 
@@ -47,6 +50,12 @@ export const AutoEpisodeFetcher: React.FC<AutoEpisodeFetcherProps> = ({ onRefres
   const addLog = (msg: string) => {
     const time = new Date().toISOString().slice(11, 19);
     setLogs((prev) => [`[${time}] ${msg}`, ...prev.slice(0, 100)]);
+
+    const isErr = msg.includes('❌') || msg.includes('Gagal') || msg.includes('Failed') || msg.includes('✖');
+    const isSuccess = msg.includes('✔') || msg.includes('🎉') || msg.includes('Berhasil') || msg.includes('✅');
+    const isWarn = msg.includes('⚠') || msg.includes('Missing');
+    const level = isErr ? 'error' : isSuccess ? 'success' : isWarn ? 'warn' : 'info';
+    addTerminalLog(level, `[AutoFetcher] ${msg}`);
   };
 
   // Fetch pending queue counts

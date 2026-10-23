@@ -12,7 +12,10 @@ export interface IEpisode extends Document {
   streamUrl: string | null;
   quality?: string | null;
   backupUrls: string[];
-  syncStatus: 'PENDING' | 'SYNCED' | 'FAILED';
+  syncStatus: 'PENDING' | 'SYNCED' | 'FAILED' | 'BACKED_UP_GDRIVE';
+  gdriveFileId?: string | null;
+  gdriveViewLink?: string | null;
+  gdriveDirectLink?: string | null;
   errorMessage: string | null;
   lastSyncedAt?: Date;
   updatedAt: Date;
@@ -33,10 +36,12 @@ const EpisodeSchema = new Schema<IEpisode>(
     backupUrls: { type: [String], default: [] },
     syncStatus: {
       type: String,
-      enum: ['PENDING', 'SYNCED', 'FAILED'],
       default: 'PENDING',
       index: true,
     },
+    gdriveFileId: { type: String, default: null },
+    gdriveViewLink: { type: String, default: null },
+    gdriveDirectLink: { type: String, default: null },
     errorMessage: { type: String, default: null },
     lastSyncedAt: { type: Date },
   },

@@ -1,9 +1,9 @@
 import React from 'react';
-import { Database, Film, Bot, RefreshCw } from 'lucide-react';
+import { Database, Film, Bot, RefreshCw, Cloud } from 'lucide-react';
 
 interface HeaderProps {
-  activeTab: 'portal' | 'fetcher' | 'sync';
-  setActiveTab: (tab: 'portal' | 'fetcher' | 'sync') => void;
+  activeTab: 'portal' | 'fetcher' | 'sync' | 'drive';
+  setActiveTab: (tab: 'portal' | 'fetcher' | 'sync' | 'drive') => void;
   isRunning: boolean;
   isPaused: boolean;
   pendingCount: number;
@@ -72,6 +72,18 @@ export const Header: React.FC<HeaderProps> = ({
                 {pendingCount}
               </span>
             )}
+          </button>
+
+          <button
+            onClick={() => setActiveTab('drive')}
+            className={`flex items-center gap-2 px-3.5 py-1.5 text-xs sm:text-sm font-medium rounded-lg transition-all whitespace-nowrap shrink-0 cursor-pointer ${
+              activeTab === 'drive'
+                ? 'bg-cyan-500 text-slate-950 font-bold shadow-md'
+                : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
+            }`}
+          >
+            <Cloud className="w-4 h-4 text-cyan-400" />
+            <span>☁️ GDrive Sync Manager</span>
           </button>
         </nav>
 
